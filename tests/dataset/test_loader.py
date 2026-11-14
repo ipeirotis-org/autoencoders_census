@@ -150,6 +150,68 @@ class TestDataLoaderAPI(unittest.TestCase):
         valid_cats = {"top-extreme", "high", "bottom-extreme", "low", "normal", "zero", "missing", "unknown"}
         self.assertTrue(set(result["x_cat"].unique()).issubset(valid_cats))
 
+    def test_load_public_opinion_filters_completers_and_excludes_lookup(self):
+        """Regression test: load_public_opinion must filter to lookup in {'Yes', 'No'}
+        (completed surveys per study1_all.R) without retaining 'lookup' as a feature."""
+        raw_df = pd.DataFrame({
+            "q1": ["A", "B", np.nan, "A"],
+            "q2": ["X", "Y", np.nan, "Y"],
+            "attention_1": [1, 2, np.nan, 1],
+            "attention_2": [1, 1, np.nan, 1],
+            "lookup": ["No", "Yes", np.nan, " No "],
+        })
+        from evaluate.detection import CHECKS, _relevant, _survivor_index
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+            raw_df.to_csv(os.path.join(data_dir, "public_opinion.csv"), index=False)
+            prev_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                # Explicit interest columns
+                loader = DataLoader(
+                    drop_columns=["attention_1", "attention_2"],
+                    rename_columns={},
+                    columns_of_interest=["q1", "q2"],
+                )
+                proj, _ = loader.load_public_opinion()
+                self.assertEqual(len(proj), 3)
+                self.assertListEqual(list(proj.columns), ["q1", "q2"])
+                self.assertNotIn("lookup", proj.columns)
+
+                # Empty COLUMNS_OF_INTEREST (e.g., demographics / downstream callers)
+                loader_all = DataLoader(
+                    drop_columns=["attention_1", "attention_2"],
+                    rename_columns={},
+                    columns_of_interest=[],
+                )
+                proj_all, _ = loader_all.load_public_opinion()
+                self.assertEqual(len(proj_all), 3)
+                self.assertNotIn("lookup", proj_all.columns)
+
+                # Explicit lookup in DROP_COLUMNS + RENAME_COLUMNS after selection
+                loader_drop_rename = DataLoader(
+                    drop_columns=["attention_1", "attention_2", "lookup"],
+                    rename_columns={"q1": "q1_renamed"},
+                    columns_of_interest=["q1", "q2"],
+                )
+                proj_dr, _ = loader_drop_rename.load_public_opinion()
+                self.assertEqual(len(proj_dr), 3)
+                self.assertListEqual(list(proj_dr.columns), ["q1_renamed", "q2"])
+
+                # Detection _survivor_index + CHECKS["public_opinion"] polarity
+                surv = _survivor_index("public_opinion")
+                self.assertListEqual(list(surv), [0, 1, 3])
+                chk = CHECKS["public_opinion"][0]
+                self.assertEqual(chk["mode"], "neq_any")
+                self.assertEqual(chk["cols"], ["attention_1", "attention_2"])
+                self.assertEqual(chk["correct"], [1, 1])
+                rel = _relevant(raw_df.loc[surv].reset_index(drop=True), chk)
+                self.assertListEqual(list(rel), [False, True, False])
+            finally:
+                os.chdir(prev_cwd)
+
 
 # Skip SADC regression tests when data files are absent (e.g. in CI)
 _SADC_2017_PATH = os.path.join(

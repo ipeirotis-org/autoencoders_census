@@ -29,7 +29,7 @@ datasets = pd.DataFrame({
     # dataset_summary_corrected.csv (dataset level) and the PUBLISHED five-seed-median detection-grid
     # AUCs + reconstruction_table.csv (per method), NOT from this script's hardcoded rows. Likewise
     # experiment_b_full.csv stores single-run AUCs, whereas the paper reports five-seed medians.
-    "Samples": [14765, 212, 2725, 308, 355, 1038, 2277, 1036, 860],
+    "Samples": [14765, 212, 2725, 308, 355, 1038, 2277, 1003, 860],
     "Variables": [98, 92, 37, 60, 72, 20, 35, 49, 67],
     "Features": [619, 323, 173, 337, 325, 135, 112, 222, 310],
     "AFV": [6.32, 3.51, 4.68, 5.62, 4.51, 6.75, 3.20, 4.53, 4.63],
@@ -68,9 +68,9 @@ recon_rows = [
     ("moss2023","AE_LIN",88.59,59.78,1.66,0.82),
     ("moss2023","AE_PL",82.73,59.78,1.49,0.75),
 
-    ("mastroianni2022","AE_NL",77.77,61.64,1.26,0.68),
-    ("mastroianni2022","AE_LIN",83.11,61.64,1.34,0.72),
-    ("mastroianni2022","AE_PL",77.57,61.64,1.25,0.68),
+    ("mastroianni2022","AE_NL",86.80,60.79,1.43,0.83),
+    ("mastroianni2022","AE_LIN",89.67,60.79,1.47,0.86),
+    ("mastroianni2022","AE_PL",86.78,60.79,1.43,0.81),
 
     ("ivanov2021","AE_NL",76.15,45.32,1.86,0.78),
     ("ivanov2021","AE_LIN",80.24,45.32,2.00,0.84),
@@ -111,8 +111,8 @@ det_rows = [
     ("moss2023","AE_LIN",0.53), ("moss2023","AE_PL",0.59), ("moss2023","CL",0.57),
 
     # mastroianni2022
-    ("mastroianni2022","AE_NL",0.66),
-    ("mastroianni2022","AE_LIN",0.52), ("mastroianni2022","AE_PL",0.68), ("mastroianni2022","CL",0.61),
+    ("mastroianni2022","AE_NL",0.57),
+    ("mastroianni2022","AE_LIN",0.62), ("mastroianni2022","AE_PL",0.58), ("mastroianni2022","CL",0.68),
 
     # ivanov2021 (Union)
     ("ivanov2021","AE_NL",0.65),
