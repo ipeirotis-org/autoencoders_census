@@ -57,7 +57,7 @@ AXES = {
 CITE = {"inattentive": "alvarez2019", "pennycook_1": "pennycook2020",
         "public_opinion": "mastroianni2022", "sadc_2017": "robinson2014"}
 # datasets whose checks leave enough passers for a reliable passer-restricted test
-WELL_POWERED = {"inattentive", "sadc_2017"}
+WELL_POWERED = {"inattentive", "public_opinion", "sadc_2017"}
 
 
 def _ae_path(ds):

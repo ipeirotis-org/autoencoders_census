@@ -776,16 +776,45 @@ class DataLoader:
 
     def load_public_opinion(self):
         url = "data/public_opinion.csv"
-        df = self.load_original_data(url)
+        saved_drop = self.DROP_COLUMNS
+        saved_ic = self.COLUMNS_OF_INTEREST
+        saved_rename = self.RENAME_COLUMNS
+        self.DROP_COLUMNS = [c for c in (saved_drop or []) if c != "lookup"]
+        self.COLUMNS_OF_INTEREST = []
+        self.RENAME_COLUMNS = {}
+        try:
+            raw_df = self.load_original_data(url)
+        finally:
+            self.DROP_COLUMNS = saved_drop
+            self.COLUMNS_OF_INTEREST = saved_ic
+            self.RENAME_COLUMNS = saved_rename
+
+        # Per Mastroianni & Dana (2022) OSF study1_all.R:47-51, drop incomplete
+        # survey dropouts (lookup neither "Yes" nor "No"), leaving N = 1,003
+        # completed surveys (matches load_moral_data / load_racial_data).
+        if "lookup" in raw_df.columns:
+            raw_df = raw_df[raw_df["lookup"].astype(str).str.strip().isin(["Yes", "No"])]
+
+        if saved_drop and "lookup" in saved_drop:
+            raw_df = raw_df.drop(columns=["lookup"], errors="ignore")
+
+        if saved_ic:
+            int_indices = [c for c in saved_ic if isinstance(c, int) and 0 <= c < len(raw_df.columns)]
+            str_names = [c for c in saved_ic if isinstance(c, str) and c in raw_df.columns]
+            selected = raw_df.columns[int_indices].tolist()
+            selected.extend([c for c in str_names if c not in selected])
+            df = raw_df[selected].copy()
+        else:
+            df = raw_df.drop(columns=["lookup"], errors="ignore")
+
+        if saved_rename:
+            df = df.rename(columns=saved_rename)
 
         for col in df.select_dtypes(include="float").columns:
             if (
                     df[col].dropna() % 1 == 0
             ).all():  # Check if all non-NaN values are whole numbers
                 df[col] = df[col].astype("Int64")
-
-        # df = df[df["Progress"] == 100]
-        # df.drop(columns=["Progress"], inplace=True)
 
         df = df.reset_index(drop=True)
 

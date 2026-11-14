@@ -101,9 +101,16 @@ def _float_to_int(df: pd.DataFrame) -> pd.DataFrame:
 def _survivor_index(dataset: str) -> pd.Index:
     raw = _read_raw(dataset)
 
-    if dataset in ("attention_check", "inattentive", "public_opinion",
-                   "mturk_ethics"):
+    if dataset in ("attention_check", "inattentive", "mturk_ethics"):
         # No row filtering in the loader -> every raw row is scored, in order.
+        return raw.index
+
+    if dataset == "public_opinion":
+        # Matches load_public_opinion and Mastroianni & Dana (2022) OSF
+        # study1_all.R:47-51 (drop incomplete dropouts where lookup is neither
+        # "Yes" nor "No", leaving N = 1,003 completed surveys).
+        if "lookup" in raw.columns:
+            return raw.index[raw["lookup"].astype(str).str.strip().isin(["Yes", "No"])]
         return raw.index
 
     if dataset == "pennycook_1":
@@ -269,12 +276,11 @@ CHECKS = {
         {"name": "attention", "cols": ["attention"], "correct": [1], "mode": "neq"},
     ],
     "public_opinion": [
-        # mastroianni2022. The attention_1 slider's default is 1; respondents who
-        # LEAVE it at 1 are the flagged (inattentive) group, so positive == 1
-        # (mode "eq"), not != 1. Verified empirically: this polarity reproduces
-        # the paper's ~0.66 AE (the != 1 reading gives 1-0.66=0.32). Confirm
-        # against the Mastroianni & Dana codebook.
-        {"name": "attention_1", "cols": ["attention_1"], "correct": [1], "mode": "eq"},
+        # mastroianni2022 (OSF study1_all.R:60-65). Respondents are instructed to
+        # type "1" into both blanks of the embedded DV check (attention_1 and
+        # attention_2); either != 1 (or missing) is excluded as reason
+        # "attention_1" (h = 29 among the 1,003 completed surveys).
+        {"name": "attention_1", "cols": ["attention_1", "attention_2"], "correct": [1, 1], "mode": "neq_any"},
     ],
     "bot_bot_mturk": [
         {"name": "Q6_15", "cols": ["Q6_15"], "correct": [7], "mode": "neq"},
@@ -347,12 +353,9 @@ def _relevant(labels: pd.DataFrame, check: dict) -> np.ndarray:
         if mode == "neq":
             relevant[i] = int(neq[0])
         elif mode == "eq":
-            # positive == answer EQUALS the flagged value (e.g. slider left at the
-            # default). A missing answer (None) is deliberately NOT the flagged
-            # value here, so it is not a positive -- unlike the neq branches where
-            # missing != correct counts as a failure. This matches the paper:
-            # inattentive (alvarez) has no missing filter values, and public_opinion
-            # has 32 blank attention_1 cells that stay attentive, giving h = 976.
+            # positive == answer EQUALS the flagged value (used for inattentive /
+            # Alvarez et al., where filter == "pass" marks the flagged group). A
+            # missing answer (None) is not equal to the flagged value.
             relevant[i] = int(vals[0] is not None and not neq[0])
         elif mode == "neq_any":
             relevant[i] = int(any(neq))
