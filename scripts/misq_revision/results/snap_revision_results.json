@@ -570,15 +570,18 @@
         "n_flipped": 2,
         "n_valid_PT": 14765,
         "n_valid_EO": 14744,
+        "LS_native": 0.422,
+        "IRV_native": 0.3375,
         "PT_raw_native": 0.6546,
         "PT_raw_oriented": 0.6546,
         "PT_pc1_native": 0.6431,
         "PT_pc1_oriented": 0.6431,
+        "MD_ord_native": 0.6855,
         "EO_raw_native": 0.5801,
         "EO_raw_oriented": 0.5801,
         "EO_pc1_native": 0.5431,
         "EO_pc1_oriented": 0.5431,
-        "IRV_native": 0.3375
+        "lz_native": null
       }
     },
     "means": {

@@ -736,9 +736,12 @@ def run_block_2_classical_and_pc1(results: dict):
         # PC1 sign alignment on ordinal battery (all 8 surveys with a battery!)
         if bat is not None and bat.shape[1] >= 2:
             B = bat.copy().astype(float)
+            ls_raw = bl.longstring(B.copy())
             pt_raw = bl.person_total_r(B.copy())
+            md_raw = bl.mahalanobis(B.copy())
             eo_raw = bl.even_odd(B.copy())
             irv_raw = bl.irv(B.copy())
+            lz_raw = bl.lz(B.copy())
 
             B_imp = B.apply(lambda c: c.fillna(c.mean()), axis=0).to_numpy(dtype=float)
             sd = np.where(B_imp.std(axis=0) > 1e-8, B_imp.std(axis=0), 1.0)
@@ -765,26 +768,32 @@ def run_block_2_classical_and_pc1(results: dict):
                 nat = float(roc_auc_score(y[m], arr[m]))
                 return round(nat, 4), round(max(nat, 1.0 - nat), 4), int(m.sum())
 
+            ls_nat, _ls_ori, _ = _eval_idx(ls_raw)
             pt_r_nat, pt_r_ori, n_pt = _eval_idx(pt_raw)
             pt_f_nat, pt_f_ori, _ = _eval_idx(pt_pc1)
+            md_nat, _md_ori, _ = _eval_idx(md_raw)
             eo_r_nat, eo_r_ori, n_eo = _eval_idx(eo_raw)
             eo_f_nat, eo_f_ori, _ = _eval_idx(eo_pc1)
             irv_nat, _irv_ori, _ = _eval_idx(irv_raw)
+            lz_nat, _lz_ori, _ = _eval_idx(lz_raw)
 
             pc1_align[cite] = {
                 "J_battery": int(B.shape[1]),
                 "n_flipped": len(flipped_cols),
                 "n_valid_PT": n_pt,
                 "n_valid_EO": n_eo,
+                "LS_native": ls_nat,
+                "IRV_native": irv_nat,
                 "PT_raw_native": pt_r_nat,
                 "PT_raw_oriented": pt_r_ori,
                 "PT_pc1_native": pt_f_nat,
                 "PT_pc1_oriented": pt_f_ori,
+                "MD_ord_native": md_nat,
                 "EO_raw_native": eo_r_nat,
                 "EO_raw_oriented": eo_r_ori,
                 "EO_pc1_native": eo_f_nat,
                 "EO_pc1_oriented": eo_f_ori,
-                "IRV_native": irv_nat,
+                "lz_native": lz_nat,
             }
             print(
                 f"  [PC1  ] {cite:16s} (J={B.shape[1]:2d}, flipped={len(flipped_cols):2d}): "
