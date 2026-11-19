@@ -555,10 +555,10 @@ def run_block_1_ablation(results: dict):
             flush=True,
         )
 
-    # Verified 92-var composite-disjoint kann2018 (`sadc_2017`)
+    # Verified 92-var composite-disjoint kann2018 (`sadc_2017`):
+    # All four {Linear, Non-Linear} x {p=100, p=85} runs share identical settings
+    # from config/simple_autoencoder.yaml (m=2, B=256, lr=1e-4, epochs=5, seeds 1..5).
     cat92, y_sadc, _ = load_dataset_bundle("sadc_2017")
-    lin100_sadc = numpy_linear_ae_seeds(cat92, m_dim=2, percentile=100, batch_size=64, epochs=5, seeds=(1, 2, 3, 4, 5))
-    lin85_sadc = numpy_linear_ae_seeds(cat92, m_dim=2, percentile=85, batch_size=64, epochs=5, seeds=(1, 2, 3, 4, 5))
     cl92 = (1.0 - CLTree(alpha=1.0).fit(cat92, mi_subsample=10000, random_state=2).score_dataframe(cat92)["pct"]).to_numpy()
     cl92_nat, cl92_ori = auc_pair(y_sadc, cl92)
 
@@ -575,34 +575,20 @@ def run_block_1_ablation(results: dict):
         "dec_drop": 0.0,
         "dec_l2": 0.0,
         "latent_act": "relu",
-        "lr": 0.001,
-        "note": "Fixed conservative preset (5 epochs, m=2)",
-    }
-    ablation["kann2018"] = {
-        "N": int(len(cat92)),
-        "m": 2,
-        "CL_native": cl92_nat,
-        "CL_oriented": cl92_ori,
-        "Lin_100_cached_native": round(float(np.median([auc_pair(y_sadc, e)[0] for e in lin100_sadc])), 4),
-        "Lin_100_s1_native": round(float(auc_pair(y_sadc, lin100_sadc[0])[0]), 4),
-        "Lin_100_med5_native": round(float(np.median([auc_pair(y_sadc, e)[0] for e in lin100_sadc])), 4),
-        "Lin_100_med5_oriented": round(float(np.median([auc_pair(y_sadc, e)[1] for e in lin100_sadc])), 4),
-        "Lin_85_s1_native": round(float(auc_pair(y_sadc, lin85_sadc[0])[0]), 4),
-        "Lin_85_med5_native": round(float(np.median([auc_pair(y_sadc, e)[0] for e in lin85_sadc])), 4),
-        "Lin_85_med5_oriented": round(float(np.median([auc_pair(y_sadc, e)[1] for e in lin85_sadc])), 4),
-        "AE_100_med_native": 0.0,
-        "AE_100_med_oriented": 0.0,
-        "AE_85_med_native": 0.0,
-        "AE_85_med_oriented": 0.0,
+        "lr": 0.0001,
+        "note": "Fixed conservative preset (5 epochs, B=256, lr=1e-4, m=2)",
     }
     if os.path.exists(YRBS_JSON) and "--recompute-yrbs-ae" not in sys.argv:
-        yrbs_ae = json.load(open(YRBS_JSON))["ae_ablation"]["df92"]
-        ae100_yrbs_nat = round(float(yrbs_ae["nonlinear_p100"]["median_auc"]), 4)
-        ae85_yrbs_nat = round(float(yrbs_ae["nonlinear_p85"]["median_auc"]), 4)
-        ablation["kann2018"]["AE_100_med_native"] = ae100_yrbs_nat
-        ablation["kann2018"]["AE_100_med_oriented"] = round(max(ae100_yrbs_nat, 1.0 - ae100_yrbs_nat), 4)
-        ablation["kann2018"]["AE_85_med_native"] = ae85_yrbs_nat
-        ablation["kann2018"]["AE_85_med_oriented"] = round(max(ae85_yrbs_nat, 1.0 - ae85_yrbs_nat), 4)
+        yrbs_full = json.load(open(YRBS_JSON))
+        yrbs_ae = yrbs_full["ae_ablation"]["df92"]
+        lin100_yrbs_seeds = [float(x) for x in yrbs_ae["linear_m2_p100"]["seed_aucs"]]
+        lin85_yrbs_seeds = [float(x) for x in yrbs_ae["linear_m2_p85"]["seed_aucs"]]
+        lin100_med_nat = round(float(yrbs_ae["linear_m2_p100"]["median_auc"]), 4)
+        lin85_med_nat = round(float(yrbs_ae["linear_m2_p85"]["median_auc"]), 4)
+        ae100_med_nat = round(float(yrbs_ae["nonlinear_p100"]["median_auc"]), 4)
+        ae85_med_nat = round(float(yrbs_ae["nonlinear_p85"]["median_auc"]), 4)
+        lin100_s1_nat = round(lin100_yrbs_seeds[0], 4)
+        lin85_s1_nat = round(lin85_yrbs_seeds[0], 4)
     else:
         yrbs_base_cfg = {
             "encoder_layers": 1,
@@ -616,12 +602,34 @@ def run_block_1_ablation(results: dict):
             "learning_rate": 1e-4,
             "epochs": 5,
         }
+        lin100_sadc = numpy_linear_ae_seeds(cat92, m_dim=2, percentile=100, batch_size=256, epochs=5, lr=1e-4, seeds=(1, 2, 3, 4, 5))
+        lin85_sadc = numpy_linear_ae_seeds(cat92, m_dim=2, percentile=85, batch_size=256, epochs=5, lr=1e-4, seeds=(1, 2, 3, 4, 5))
         ae100_sadc = fast_keras_ae_seeds(cat92, {**yrbs_base_cfg, "percentile": 100}, batch_size=256, seeds=(1, 2, 3, 4, 5))
         ae85_sadc = fast_keras_ae_seeds(cat92, {**yrbs_base_cfg, "percentile": 85}, batch_size=256, seeds=(1, 2, 3, 4, 5))
-        ablation["kann2018"]["AE_100_med_native"] = round(float(np.median([auc_pair(y_sadc, e)[0] for e in ae100_sadc])), 4)
-        ablation["kann2018"]["AE_100_med_oriented"] = round(float(np.median([auc_pair(y_sadc, e)[1] for e in ae100_sadc])), 4)
-        ablation["kann2018"]["AE_85_med_native"] = round(float(np.median([auc_pair(y_sadc, e)[0] for e in ae85_sadc])), 4)
-        ablation["kann2018"]["AE_85_med_oriented"] = round(float(np.median([auc_pair(y_sadc, e)[1] for e in ae85_sadc])), 4)
+        lin100_s1_nat = round(float(auc_pair(y_sadc, lin100_sadc[0])[0]), 4)
+        lin85_s1_nat = round(float(auc_pair(y_sadc, lin85_sadc[0])[0]), 4)
+        lin100_med_nat = round(float(np.median([auc_pair(y_sadc, e)[0] for e in lin100_sadc])), 4)
+        lin85_med_nat = round(float(np.median([auc_pair(y_sadc, e)[0] for e in lin85_sadc])), 4)
+        ae100_med_nat = round(float(np.median([auc_pair(y_sadc, e)[0] for e in ae100_sadc])), 4)
+        ae85_med_nat = round(float(np.median([auc_pair(y_sadc, e)[0] for e in ae85_sadc])), 4)
+
+    ablation["kann2018"] = {
+        "N": int(len(cat92)),
+        "m": 2,
+        "CL_native": cl92_nat,
+        "CL_oriented": cl92_ori,
+        "Lin_100_cached_native": lin100_med_nat,
+        "Lin_100_s1_native": lin100_s1_nat,
+        "Lin_100_med5_native": lin100_med_nat,
+        "Lin_100_med5_oriented": round(max(lin100_med_nat, 1.0 - lin100_med_nat), 4),
+        "Lin_85_s1_native": lin85_s1_nat,
+        "Lin_85_med5_native": lin85_med_nat,
+        "Lin_85_med5_oriented": round(max(lin85_med_nat, 1.0 - lin85_med_nat), 4),
+        "AE_100_med_native": ae100_med_nat,
+        "AE_100_med_oriented": round(max(ae100_med_nat, 1.0 - ae100_med_nat), 4),
+        "AE_85_med_native": ae85_med_nat,
+        "AE_85_med_oriented": round(max(ae85_med_nat, 1.0 - ae85_med_nat), 4),
+    }
     print(f"  kann2018         (N={len(cat92):5d}, m=2): {ablation['kann2018']}", flush=True)
 
     keys9 = list(ablation.keys())
