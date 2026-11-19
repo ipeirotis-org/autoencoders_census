@@ -25,13 +25,14 @@ PAPER_DIR=../inattentiveness_paper python scripts/misq_revision/run_coherence_si
 # Full 92-variable disjoint YRBS (Kann et al., 2018) revision analyses
 python scripts/misq_revision/run_yrbs_revision.py
 
-# Standardize Author (Year) labels in Figures 4 & 8
+# Standardize Author (Year) labels in Figures 4 & 8 (installs PyMuPDF if needed)
+pip install -r scripts/misq_revision/requirements-revision.txt
 PAPER_DIR=../inattentiveness_paper python scripts/misq_revision/update_figures.py
 ```
 
 ### 2. Multi-dataset scripts (run against the restored `2026-10-23` paper-data snapshot)
 
-`run_all_snap_experiments.py` and `generate_snap_figures.py` read the eight non-YRBS benchmark CSVs, `tuned_<ds>/oracle.json` trial caches, and evaluation helpers restored from `gs://autoencoders-census-paper-data/snapshots/2026-10-23` (see PR #55 / `restore_paper_data.py` in the snapshot):
+`run_all_snap_experiments.py` and `generate_snap_figures.py` read the eight non-YRBS benchmark CSVs, `tuned_<ds>/oracle.json` trial caches, and evaluation helpers restored from `gs://autoencoders-census-paper-data/snapshots/2026-10-23` (see PR #55 / `restore_paper_data.py` in the snapshot). By default `run_all_snap_experiments.py` recomputes all five experiment blocks from scratch (pass `--resume` with `CHECKPOINT_JSON=/path/to/ckpt.json` to resume an interrupted run):
 
 ```bash
 SNAP_REPO=/path/to/restored/autoencoders_census \

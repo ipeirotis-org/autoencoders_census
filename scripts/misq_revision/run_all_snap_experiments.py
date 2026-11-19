@@ -62,6 +62,8 @@ from experiment_b import fairness as F
 from revision_experiments import lib_r2 as L
 
 OUT_JSON = os.environ.get("OUT_JSON", os.path.join(SCRIPT_DIR, "results", "snap_revision_results.json"))
+CHECKPOINT_JSON = os.environ.get("CHECKPOINT_JSON", "")
+YRBS_JSON = os.environ.get("YRBS_JSON", os.path.join(SCRIPT_DIR, "results", "yrbs_revision_results.json"))
 
 DS_8 = [
     "attention_check",
@@ -96,8 +98,9 @@ SADC_COMP_6 = [
 
 
 def save_ckpt(results: dict):
-    os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)
-    with open(OUT_JSON, "w") as f:
+    target = CHECKPOINT_JSON or OUT_JSON
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    with open(target, "w") as f:
         json.dump(results, f, indent=2)
 
 
@@ -587,11 +590,38 @@ def run_block_1_ablation(results: dict):
         "Lin_85_s1_native": round(float(auc_pair(y_sadc, lin85_sadc[0])[0]), 4),
         "Lin_85_med5_native": round(float(np.median([auc_pair(y_sadc, e)[0] for e in lin85_sadc])), 4),
         "Lin_85_med5_oriented": round(float(np.median([auc_pair(y_sadc, e)[1] for e in lin85_sadc])), 4),
-        "AE_100_med_native": 0.6880,
-        "AE_100_med_oriented": 0.6880,
-        "AE_85_med_native": 0.6920,
-        "AE_85_med_oriented": 0.6920,
+        "AE_100_med_native": 0.0,
+        "AE_100_med_oriented": 0.0,
+        "AE_85_med_native": 0.0,
+        "AE_85_med_oriented": 0.0,
     }
+    if os.path.exists(YRBS_JSON) and "--recompute-yrbs-ae" not in sys.argv:
+        yrbs_ae = json.load(open(YRBS_JSON))["ae_ablation"]["df92"]
+        ae100_yrbs_nat = round(float(yrbs_ae["nonlinear_p100"]["median_auc"]), 4)
+        ae85_yrbs_nat = round(float(yrbs_ae["nonlinear_p85"]["median_auc"]), 4)
+        ablation["kann2018"]["AE_100_med_native"] = ae100_yrbs_nat
+        ablation["kann2018"]["AE_100_med_oriented"] = round(max(ae100_yrbs_nat, 1.0 - ae100_yrbs_nat), 4)
+        ablation["kann2018"]["AE_85_med_native"] = ae85_yrbs_nat
+        ablation["kann2018"]["AE_85_med_oriented"] = round(max(ae85_yrbs_nat, 1.0 - ae85_yrbs_nat), 4)
+    else:
+        yrbs_base_cfg = {
+            "encoder_layers": 1,
+            "encoder_units_1": 128,
+            "encoder_activation_1": "relu",
+            "latent_space_dim": 2,
+            "latent_activation": "relu",
+            "decoder_layers": 1,
+            "decoder_units_1": 128,
+            "decoder_activation_1": "relu",
+            "learning_rate": 1e-4,
+            "epochs": 5,
+        }
+        ae100_sadc = fast_keras_ae_seeds(cat92, {**yrbs_base_cfg, "percentile": 100}, batch_size=256, seeds=(1, 2, 3, 4, 5))
+        ae85_sadc = fast_keras_ae_seeds(cat92, {**yrbs_base_cfg, "percentile": 85}, batch_size=256, seeds=(1, 2, 3, 4, 5))
+        ablation["kann2018"]["AE_100_med_native"] = round(float(np.median([auc_pair(y_sadc, e)[0] for e in ae100_sadc])), 4)
+        ablation["kann2018"]["AE_100_med_oriented"] = round(float(np.median([auc_pair(y_sadc, e)[1] for e in ae100_sadc])), 4)
+        ablation["kann2018"]["AE_85_med_native"] = round(float(np.median([auc_pair(y_sadc, e)[0] for e in ae85_sadc])), 4)
+        ablation["kann2018"]["AE_85_med_oriented"] = round(float(np.median([auc_pair(y_sadc, e)[1] for e in ae85_sadc])), 4)
     print(f"  kann2018         (N={len(cat92):5d}, m=2): {ablation['kann2018']}", flush=True)
 
     keys9 = list(ablation.keys())
@@ -1387,11 +1417,13 @@ def run_block_5_sample_size_and_coherence(results: dict):
 
 def main():
     t_all = time.time()
-    results = json.load(open(OUT_JSON)) if os.path.exists(OUT_JSON) else {}
+    resume = ("--resume" in sys.argv) or (os.environ.get("RESUME", "0") == "1")
+    ckpt_src = CHECKPOINT_JSON or OUT_JSON
+    results = json.load(open(ckpt_src)) if (resume and os.path.exists(ckpt_src)) else {}
     if "ablation_2x2" not in results:
         run_block_1_ablation(results)
     else:
-        print("Skipping Block 1 (already checkpointed in snap_revision_results.json)", flush=True)
+        print(f"Skipping Block 1 (resumed from {ckpt_src})", flush=True)
     if "full_feature_baselines" not in results:
         run_block_2_classical_and_pc1(results)
     if "disjoint_downstream" not in results:
@@ -1400,6 +1432,9 @@ def main():
         run_block_4_covariate_validity_and_fairness(results)
     if "sample_size_analysis" not in results:
         run_block_5_sample_size_and_coherence(results)
+    os.makedirs(os.path.dirname(os.path.abspath(OUT_JSON)), exist_ok=True)
+    with open(OUT_JSON, "w") as f:
+        json.dump(results, f, indent=2)
     print(f"\nALL 5 [SNAP] BLOCKS COMPLETED SUCCESSFULLY in {time.time()-t_all:.1f}s -> {OUT_JSON}", flush=True)
 
 

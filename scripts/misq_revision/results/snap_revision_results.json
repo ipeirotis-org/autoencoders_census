@@ -287,10 +287,10 @@
         "Lin_85_s1_native": 0.709,
         "Lin_85_med5_native": 0.7073,
         "Lin_85_med5_oriented": 0.7073,
-        "AE_100_med_native": 0.688,
-        "AE_100_med_oriented": 0.688,
-        "AE_85_med_native": 0.692,
-        "AE_85_med_oriented": 0.692
+        "AE_100_med_native": 0.6922,
+        "AE_100_med_oriented": 0.6922,
+        "AE_85_med_native": 0.6856,
+        "AE_85_med_oriented": 0.6856
       }
     },
     "means_9": {
@@ -301,10 +301,10 @@
       "Lin_100_med5_oriented": 0.6457,
       "Lin_85_med5_native": 0.6819,
       "Lin_85_med5_oriented": 0.6819,
-      "AE_100_med_native": 0.6398,
-      "AE_100_med_oriented": 0.6417,
-      "AE_85_med_native": 0.6869,
-      "AE_85_med_oriented": 0.6869
+      "AE_100_med_native": 0.6403,
+      "AE_100_med_oriented": 0.6422,
+      "AE_85_med_native": 0.6862,
+      "AE_85_med_oriented": 0.6862
     }
   },
   "full_feature_baselines": {
@@ -1895,7 +1895,7 @@
         "mean_max_nbr_NMI": 0.4886,
         "alpha_pc1": 0.6694,
         "CL_AUC": 0.7328,
-        "AE85_AUC": 0.692
+        "AE85_AUC": 0.6856
       }
     ],
     "correlations": {
@@ -1909,8 +1909,8 @@
         },
         "AE85_AUC": {
           "n": 9,
-          "pearson_r": 0.5308,
-          "pearson_p": 0.1415,
+          "pearson_r": 0.519,
+          "pearson_p": 0.1522,
           "spearman_rho": 0.3833,
           "spearman_p": 0.3085
         }
@@ -1925,8 +1925,8 @@
         },
         "AE85_AUC": {
           "n": 9,
-          "pearson_r": 0.5361,
-          "pearson_p": 0.1368,
+          "pearson_r": 0.5249,
+          "pearson_p": 0.1467,
           "spearman_rho": 0.4333,
           "spearman_p": 0.244
         }
@@ -1941,8 +1941,8 @@
         },
         "AE85_AUC": {
           "n": 8,
-          "pearson_r": 0.6207,
-          "pearson_p": 0.1006,
+          "pearson_r": 0.622,
+          "pearson_p": 0.0997,
           "spearman_rho": 0.5476,
           "spearman_p": 0.16
         }

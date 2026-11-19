@@ -1,22 +1,19 @@
 """
-Standardize Dataset Naming Across Figures 2, 8, and 9 (Referee Minor 3.2):
+Standardize Dataset Naming Across Figures 4 and 8 (Referee Minor 3.2):
   1. Regenerate figures/reconstruction_ora.pdf from the verified 27 ORA values in
-     Table tab:reconstruction_perf (appendices.tex:600-650) with full Author (Year) labels.
+     Table tab:reconstruction_perf (appendices.tex) with full Author (Year) labels.
   2. Losslessly update panel titles in figures/fairness_frontier.pdf:
        'alvarez2019  (well-powered)'                -> 'Alvarez et al. (2019)  (well-powered)'
        'robinson2014  (well-powered)'               -> 'Kann et al. (2018)  (well-powered)'
        'ogrady2019  (gender axis only; indicative)' -> "O'Grady (2019)  (gender axis; indicative)"
-  3. Losslessly update panel titles in figures/downstream_sharpening.pdf:
-       '(a) pennycook (2020): accuracy discernment' -> '(a) Pennycook et al. (2020): accuracy discernment'
-       '(b) alvarez (2019): attitude constraint'    -> '(b) Alvarez et al. (2019): attitude constraint'
 """
 import os
 import shutil
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pymupdf
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PAPER_DIR = os.environ.get("PAPER_DIR", os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "inattentiveness_paper")))
@@ -26,7 +23,6 @@ if BACKUP_DIR:
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
 TTF_DIR = os.path.join(os.path.dirname(matplotlib.__file__), "mpl-data", "fonts", "ttf")
-DEJAVU_SANS = os.path.join(TTF_DIR, "DejaVuSans.ttf")
 DEJAVU_SERIF = os.path.join(TTF_DIR, "DejaVuSerif.ttf")
 
 
@@ -41,8 +37,6 @@ def backup_once(fname):
 
 def regenerate_reconstruction_ora():
     backup_once("reconstruction_ora.pdf")
-    # Exact verified ORA values from Table tab:reconstruction_perf (appendices.tex:600-650),
-    # ordered bottom-to-top exactly as in the original figure:
     rows = [
         ("Pennycook et al. (2020)",      0.79, 0.77, 0.70),
         ("Kann et al. (2018)",           0.75, 0.73, 0.79),
@@ -79,7 +73,6 @@ def regenerate_reconstruction_ora():
     p85_vals = [r[2] for r in rows]
     lin_vals = [r[3] for r in rows]
 
-    # Plot order so overlapping Ivanov (0.81, 0.81) remains visible or matches original
     ax.scatter(p100_vals, ys, s=62, color="#0072B2", label=r"AE ($p = 100$)", zorder=3)
     ax.scatter(p85_vals, ys, s=62, color="#E69F00", label=r"AE + PL ($p = 85$)", zorder=4)
     ax.scatter(lin_vals, ys, s=62, color="#009E73", label="Linear AE", zorder=5)
@@ -106,9 +99,20 @@ def regenerate_reconstruction_ora():
 
 
 def replace_titles_in_pdf(fname, replacements, fontfile, fontname):
+    try:
+        import pymupdf
+    except ImportError as exc:
+        raise ImportError(
+            "PyMuPDF is required to relabel PDF panel titles; install via "
+            "`pip install -r scripts/misq_revision/requirements-revision.txt`."
+        ) from exc
+
     backup_once(fname)
-    src = os.path.join(BACKUP_DIR, fname)
     dst = os.path.join(FIG_DIR, fname)
+    src = os.path.join(BACKUP_DIR, fname) if BACKUP_DIR else dst
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"Input figure PDF not found: {src}")
+
     doc = pymupdf.open(src)
     page = doc[0]
     font_obj = pymupdf.Font(fontfile=fontfile)
@@ -116,17 +120,21 @@ def replace_titles_in_pdf(fname, replacements, fontfile, fontname):
     matched = 0
     spans_to_edit = []
     for b in page.get_text("dict")["blocks"]:
-        for l in b.get("lines", []):
-            for s in l.get("spans", []):
+        for line in b.get("lines", []):
+            for s in line.get("spans", []):
                 txt = s["text"]
                 for old_sub, new_txt in replacements.items():
                     if old_sub in txt:
                         spans_to_edit.append((s, new_txt))
                         break
 
-    for s, new_txt in spans_to_edit:
+    if not spans_to_edit:
+        doc.close()
+        print(f"No legacy panel titles remaining in {dst} (already standardized)")
+        return
+
+    for s, _new_txt in spans_to_edit:
         bbox = pymupdf.Rect(s["bbox"])
-        # Slightly pad horizontally in title whitespace so nothing remains
         pad_rect = pymupdf.Rect(bbox.x0 - 4, bbox.y0 - 1, bbox.x1 + 4, bbox.y1 + 1)
         page.add_redact_annot(pad_rect, fill=(1, 1, 1))
         matched += 1
@@ -149,8 +157,10 @@ def replace_titles_in_pdf(fname, replacements, fontfile, fontname):
             color=(0, 0, 0),
         )
 
-    doc.save(dst, garbage=4, deflate=True)
+    tmp_dst = dst + ".tmp"
+    doc.save(tmp_dst, garbage=4, deflate=True)
     doc.close()
+    os.replace(tmp_dst, dst)
     print(f"Updated {matched} panel titles in {dst}")
 
 
@@ -165,13 +175,4 @@ if __name__ == "__main__":
         },
         DEJAVU_SERIF,
         "F_DejaVuSerif",
-    )
-    replace_titles_in_pdf(
-        "downstream_sharpening.pdf",
-        {
-            "pennycook (2020)": "(a) Pennycook et al. (2020): accuracy discernment",
-            "alvarez (2019)": "(b) Alvarez et al. (2019): attitude constraint",
-        },
-        DEJAVU_SANS,
-        "F_DejaVuSans",
     )
