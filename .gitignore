@@ -76,6 +76,7 @@ service-account.json
 !cors.json
 !.cloud-config.json
 !.claude/settings.json
+!scripts/misq_revision/results/*.json
 
 # Cloud -- never commit plaintext credentials
 credentials.json
