@@ -717,7 +717,7 @@ def run_block_2_classical_and_pc1(results: dict):
         data_df, y, bat = load_dataset_bundle(ds)
         _, vectorized, _, _ = prepare_for_model(data_df, {})
         X = vectorized.to_numpy(dtype=np.float64)
-        m_dim = 5 if ds == "sadc_2017" else int(yaml.safe_load(open(f"cache/_tuned_{ds}_ae/best_hyperparameters.yaml"))["latent_space_dim"])
+        m_dim = 2 if ds == "sadc_2017" else int(yaml.safe_load(open(f"cache/_tuned_{ds}_ae/best_hyperparameters.yaml"))["latent_space_dim"])
         sc_dict = onehot_classical_scores(X, m_dim)
 
         row_ff = {"N": int(X.shape[0]), "V": int(prepare_for_categorical(data_df.copy()).shape[1]), "D_onehot": int(X.shape[1])}
@@ -1133,9 +1133,9 @@ def run_block_4_covariate_validity_and_fairness(results: dict):
         "encoder_layers": 1, "encoder_units_1": 128, "encoder_activation_1": "relu",
         "latent_space_dim": 2, "latent_activation": "relu",
         "decoder_layers": 1, "decoder_units_1": 128, "decoder_activation_1": "relu",
-        "learning_rate": 1e-3, "epochs": 5, "percentile": 85,
+        "learning_rate": 1e-4, "epochs": 5, "percentile": 85,
     }
-    ae92_sc = fast_keras_ae_seeds(cat92, cfg92, batch_size=64, seeds=(1,))[0]
+    ae92_sc = fast_keras_ae_seeds(cat92, cfg92, batch_size=256, seeds=(1,))[0]
 
     for ds in ["inattentive", "public_opinion", "pennycook_1"]:
         cite = CITE[ds]
