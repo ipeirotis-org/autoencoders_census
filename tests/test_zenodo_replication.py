@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -139,11 +140,25 @@ def _make_stub_repos(tmp: Path, include_harness: bool = True, pdf_author: str = 
     )
     (paper_repo / "MISQ_online_supplement.pdf").write_bytes(_make_minimal_valid_pdf(author=pdf_author))
 
-    # Minimal snapshot for hydration test (score caches + derived CSV + heavy weights + third-party CSV)
-    (snap_dir / "cache" / "_fix9_inattentive_cl").mkdir(parents=True, exist_ok=True)
-    (snap_dir / "cache" / "_fix9_inattentive_cl" / "errors.csv").write_text("row,pct\n0,0.5\n", encoding="utf-8")
+    # Complete synthetic snapshot for hydration tests (all 8 DS_8 caches + derived CSV + heavy weights + third-party CSV)
+    for ds in bzp.EXTERNAL_BENCHMARK_KEYS:
+        hp_path = snap_dir / "cache" / f"_tuned_{ds}_ae" / "best_hyperparameters.yaml"
+        hp_path.parent.mkdir(parents=True, exist_ok=True)
+        hp_path.write_text("latent_space_dim: 4\n", encoding="utf-8")
+        lin_path = snap_dir / "cache" / f"_lin0_{ds}" / "errors.csv"
+        lin_path.parent.mkdir(parents=True, exist_ok=True)
+        lin_path.write_text("row,error\n0,0.5\n", encoding="utf-8")
+        if ds != "public_opinion":
+            for rel_err, hdr in (
+                (f"_fix9_{ds}_cl/errors.csv", "row,pct\n0,0.5\n"),
+                (f"_tuned_{ds}_ae_p85/errors.csv", "row,error\n0,0.5\n"),
+                (f"_tuned_{ds}_ae_p100/errors.csv", "row,error\n0,0.5\n"),
+                (f"_ms_{ds}_p85_s1/errors.csv", "row,error\n0,0.5\n"),
+            ):
+                ep = snap_dir / "cache" / rel_err
+                ep.parent.mkdir(parents=True, exist_ok=True)
+                ep.write_text(hdr, encoding="utf-8")
     (snap_dir / "cache" / "_tuned_inattentive_ae" / "autoencoder").mkdir(parents=True, exist_ok=True)
-    (snap_dir / "cache" / "_tuned_inattentive_ae" / "best_hyperparameters.yaml").write_text("latent_space_dim: 4\n", encoding="utf-8")
     (snap_dir / "cache" / "_tuned_inattentive_ae" / "autoencoder" / "saved_model.pb").write_bytes(b"heavy-weights")
     (snap_dir / "sample_size_results.csv").write_text("dataset,N,seed,AE_AUC,CL_AUC\ninattentive,100,1,0.7,0.75\n", encoding="utf-8")
     (snap_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -159,7 +174,7 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             code_repo, paper_repo, snap_dir = _make_stub_repos(tmp)
             out_dir = tmp / "out"
 
-            # 1. Camera-ready build with snapshot score-cache + sample_size_results.csv hydration
+            # 1. Camera-ready build with COMPLETE snapshot cache + sample_size_results.csv hydration
             rc = bzp.main([
                 "--mode", "camera-ready",
                 "--version", "1.0.0",
@@ -176,6 +191,9 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             self.assertTrue((stage / "code" / "cache" / "_fix9_inattentive_cl" / "errors.csv").is_file())
             self.assertTrue((stage / "code" / "cache" / "_tuned_inattentive_ae" / "best_hyperparameters.yaml").is_file())
             self.assertTrue((stage / "code" / "sample_size_results.csv").is_file())
+            cr_manifest = json.loads((stage / "MANIFEST.json").read_text(encoding="utf-8"))
+            self.assertTrue(cr_manifest["hydration"]["cache_complete"])
+            self.assertEqual(cr_manifest["hydration"]["missing_cache_files_count"], 0)
             # Heavy weights and third-party raw CSVs stay excluded by default
             self.assertFalse((stage / "code" / "cache" / "_tuned_inattentive_ae" / "autoencoder" / "saved_model.pb").exists())
             self.assertFalse((stage / "code" / "data" / "inattentive_users.csv").exists())
@@ -212,7 +230,7 @@ class TestZenodoReplicationPackage(unittest.TestCase):
                 self.assertIsNone(zf.testzip())
             utz.verify_archive_matches_stage(stage, zip_path)
 
-            # 1b. Hydrated snapshot WITHOUT sample_size_results.csv must mark Step 5b REQUIRED
+            # 1b. Complete cache snapshot WITHOUT sample_size_results.csv must mark Step 5b REQUIRED
             (snap_dir / "sample_size_results.csv").unlink()
             out_dir_partial = tmp / "out_partial"
             rc_partial = bzp.main([
@@ -230,6 +248,28 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("**Prerequisite (`code/sample_size_results.csv`):**", partial_readme)
             self.assertIn("Step 5b (REQUIRED when sample_size_results.csv is not bundled)", partial_readme)
+
+            # 1c. Snapshot WITH sample_size_results.csv but NO cache/ must STILL mark Step 5a REQUIRED
+            shutil.rmtree(snap_dir / "cache")
+            (snap_dir / "sample_size_results.csv").write_text("dataset,N,seed,AE_AUC,CL_AUC\ninattentive,100,1,0.7,0.75\n", encoding="utf-8")
+            out_dir_nocache = tmp / "out_nocache"
+            rc_nocache = bzp.main([
+                "--mode", "camera-ready",
+                "--version", "1.0.0",
+                "--code-repo", str(code_repo),
+                "--paper-repo", str(paper_repo),
+                "--snapshot-dir", str(snap_dir),
+                "--output-dir", str(out_dir_nocache),
+                "--skip-archives",
+            ])
+            self.assertEqual(rc_nocache, 0)
+            nocache_stage = out_dir_nocache / "inattentiveness-screening-replication-v1.0.0"
+            nocache_manifest = json.loads((nocache_stage / "MANIFEST.json").read_text(encoding="utf-8"))
+            self.assertFalse(nocache_manifest["hydration"]["cache_complete"])
+            self.assertGreater(nocache_manifest["hydration"]["missing_cache_files_count"], 0)
+            nocache_readme = (nocache_stage / "README.md").read_text(encoding="utf-8")
+            self.assertIn("**Prerequisite (`code/cache/`):**", nocache_readme)
+            self.assertIn("Step 5a (REQUIRED when code/cache/ is missing or incomplete)", nocache_readme)
 
             # 2. Blind build (unhydrated) with --omit-supplement-pdf works on any host
             rc_blind = bzp.main([
@@ -258,6 +298,7 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             self.assertIn("python -m experiment_b.sample_size", blind_readme)
             manifest = json.loads((blind_stage / "MANIFEST.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["source_commits"].get("redacted_for_blind_review"))
+            self.assertFalse(manifest["hydration"]["cache_complete"])
             self.assertTrue(manifest["verification"]["passed"])
             self.assertEqual(manifest["verification"]["blind_anonymity_hits"], [])
 
