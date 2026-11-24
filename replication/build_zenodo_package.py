@@ -313,6 +313,16 @@ def sanitize_code_paths(code_root: Path, blind: bool) -> List[str]:
             p_snap_fig.write_text(txt, encoding="utf-8")
             notes.append("Added FIG_DIR directory creation in code/scripts/misq_revision/generate_snap_figures.py")
 
+    for sh_path in sorted((code_root / "experiment_b").glob("run_*.sh")) if (code_root / "experiment_b").is_dir() else []:
+        txt = sh_path.read_text(encoding="utf-8")
+        if "source venv_ae311/bin/activate" in txt:
+            txt = txt.replace(
+                "source venv_ae311/bin/activate",
+                "if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi",
+            )
+            sh_path.write_text(txt, encoding="utf-8")
+            notes.append(f"Normalized venv activation in code/experiment_b/{sh_path.name}")
+
     p4 = code_root / "scripts" / "misq_revision" / "README.md"
     if p4.exists() and blind:
         txt = p4.read_text(encoding="utf-8")
@@ -435,6 +445,7 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
             - **Active source repositories:**
               - Code and web platform: <https://github.com/ipeirotis-org/autoencoders_census>
               - Manuscript and Lean 4 formalization: <https://github.com/ipeirotis-org/inattentiveness_paper>
+
         """)
     )
 
@@ -456,7 +467,47 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
             "per-respondent score caches (`code/cache/`) for exact score-level replay."
         )
 
-    return textwrap.dedent(f"""\
+    if hydration.get("hydrated"):
+        step5_cache_note = (
+            "This archive already ships hydrated `code/cache/` score caches and tuned configs, so "
+            "Steps 5a–5b are optional (only needed if retraining models from scratch)."
+        )
+        step5_prefix = "# Steps 5a-5b (optional when code/cache/ is already hydrated): refit from scratch"
+    else:
+        step5_cache_note = (
+            "**Prerequisite (`code/cache/`):** `run_all_snap_experiments.py` and "
+            "`generate_snap_figures.py` read tuned hyperparameters (`cache/_tuned_<ds>_ae/best_hyperparameters.yaml`) "
+            "and detector score caches (`cache/_fix9_<ds>_cl/errors.csv`, `cache/_tuned_<ds>_ae_p{85,100}/errors.csv`, "
+            "`cache/_ms_<ds>_p{85,100}_s{1..5}/errors.csv`, `cache/_lin0_<ds>/errors.csv`). Because this archive "
+            "was built without `--snapshot-dir`, you **must** run Steps 5a–5b first (or rebuild with `--snapshot-dir` "
+            "against the score-cache snapshot) before executing Steps 5c–5d."
+        )
+        step5_prefix = "# Steps 5a-5b (REQUIRED when code/cache/ is not pre-hydrated): populate code/cache/"
+
+    step5_block = textwrap.dedent(f"""\
+        {step5_cache_note}
+
+        ```bash
+        # Run from code/ with .venv active
+        {step5_prefix}
+        for ds in attention_check bot_bot_mturk inattentive moral_data mturk_ethics pennycook_1 public_opinion racial_data; do
+          python main.py chow_liu_outliers --data "$ds" --output "cache/_fix9_${{ds}}_cl/"
+        done
+        bash experiment_b/run_tuning.sh
+        bash experiment_b/run_finalize.sh
+        bash experiment_b/run_multiseed.sh
+        python -m experiment_b.linear_ae
+
+        # Step 5c: Run unified 9-survey ablations, classical one-hot baselines,
+        # fairness audits, sample-size curves, and downstream analyses
+        SNAP_REPO=$PWD python scripts/misq_revision/run_all_snap_experiments.py
+
+        # Step 5d: Regenerate figures into ../outputs/figures/
+        mkdir -p ../outputs/figures
+        SNAP_REPO=$PWD FIG_DIR=../outputs/figures python scripts/misq_revision/generate_snap_figures.py
+        ```""")
+
+    body = textwrap.dedent(f"""\
         # Replication Package: *{PAPER_TITLE}*
 
         **Version:** `{version}` ({mode})
@@ -509,6 +560,8 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
 
         ## Quick Start
 
+        Start from the unpacked package root directory (`{pkg_name}/`).
+
         ### 1. Verify Package Integrity (SHA-256)
 
         ```bash
@@ -518,11 +571,11 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         ### 2. Verify Machine-Checked Proofs in Lean 4 (~5 seconds, zero external dependencies)
 
         Requires Lean 4 `v4.35.0` (exact toolchain pinned in `lean/lean-toolchain`, e.g., via `elan`).
-        No Mathlib or external package downloads are required.
+        No Mathlib or external package downloads are required. Run in a subshell to remain at the
+        package root:
 
         ```bash
-        cd lean
-        lake build
+        (cd lean && lake build)
         ```
 
         All five modules under `lean/InattentivenessProofs/` (`OrderedField.lean`, `Basic.lean`,
@@ -534,6 +587,8 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         the manuscript.
 
         ### 3. Set Up Python Environment (Python 3.11 recommended)
+
+        Enter `code/` once and activate `.venv` (Steps 4–6 run from `code/` in the same shell):
 
         ```bash
         cd code
@@ -556,8 +611,8 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         dataset:
 
         ```bash
-        cd code
-        # Run unit & integration test suite
+        # Run from code/ with .venv active
+        # Unit & integration test suite
         PYTHONPATH=$PWD pytest tests/ -v
 
         # Reproduce Section 7.5 / Figure 5 controlled coherence simulation
@@ -574,39 +629,23 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         After placing the eight third-party survey CSVs under `code/data/` (see `DATA_PROVENANCE.md`
         for canonical repositories and exact filenames):
 
-        ```bash
-        cd code
-        # Step 1: Fit closed-form Chow-Liu scorer on any benchmark dataset
-        python main.py chow_liu_outliers --data inattentive --output cache/_fix9_inattentive_cl/
-
-        # Step 2 (optional): Retrain AE / Linear AE models from scratch
-        bash experiment_b/run_tuning.sh
-        bash experiment_b/run_finalize.sh
-        bash experiment_b/run_linear.sh
-
-        # Step 3: Run unified 9-survey ablations, classical one-hot baselines,
-        # fairness audits, sample-size curves, and downstream analyses
-        SNAP_REPO=$PWD python scripts/misq_revision/run_all_snap_experiments.py
-
-        # Step 4: Regenerate figures into outputs/figures/
-        mkdir -p ../outputs/figures
-        SNAP_REPO=$PWD FIG_DIR=../outputs/figures python scripts/misq_revision/generate_snap_figures.py
-        ```
+        __STEP5_BLOCK__
 
         ### 6. Screen Your Own Survey CSV (Label-Free)
 
         ```bash
-        cd code
+        # Run from code/ with .venv active
         python main.py chow_liu_outliers --data /path/to/your_survey.csv --output ./screening_out/
         ```
 
-        {demo_section}## Licensing
+        __DEMO_SECTION__## Licensing
 
         - **Software & Lean 4 Proofs (`code/`, `lean/`):** MIT License (`LICENSE`).
         - **Documentation, Verified Result Summaries & Technical Supplement (`README.md`, `*.md`, `results/`, `docs/`):** Creative Commons Attribution 4.0 International (`CC-BY-4.0`, `LICENSE-DOCS.txt`).
         - **Bundled CDC 2017 YRBS Dataset (`code/data/sadc_2017only_national_full.csv`):** U.S. Federal Government Public Domain (17 U.S.C. § 105).
         - **External Benchmark Datasets:** Governed by each original study's repository license (`DATA_PROVENANCE.md`).
     """)
+    return body.replace("__STEP5_BLOCK__", step5_block).replace("__DEMO_SECTION__", demo_section)
 
 
 def build_reproduction_map() -> str:

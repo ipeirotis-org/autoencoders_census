@@ -179,9 +179,18 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             self.assertFalse((stage / "code" / "data" / "inattentive_users.csv").exists())
             # Zero bytecode files leaked into staged tree
             self.assertEqual(list(stage.rglob("*.pyc")), [])
-            # Quick-start README and staged simulation scripts create ../outputs/figures
+            # Quick-start README: clean column-0 markdown, consistent CWD, ../outputs/figures creation, and hydrated cache note
             readme_txt = (stage / "README.md").read_text(encoding="utf-8")
+            self.assertTrue(readme_txt.startswith("# Replication Package:"))
+            self.assertIn("\n## Companion Software and Web Application\n", readme_txt)
+            self.assertIn("\n## Licensing\n", readme_txt)
             self.assertIn("mkdir -p ../outputs/figures", readme_txt)
+            self.assertIn("(cd lean && lake build)", readme_txt)
+            self.assertEqual(readme_txt.count("\ncd code\n"), 1)
+            self.assertIn("optional when code/cache/ is already hydrated", readme_txt)
+            self.assertIn("bash experiment_b/run_multiseed.sh", readme_txt)
+            self.assertIn("python -m experiment_b.linear_ae", readme_txt)
+            self.assertNotIn("run_linear.sh", readme_txt)
             sim_txt = (stage / "code" / "scripts" / "misq_revision" / "run_coherence_sim.py").read_text(encoding="utf-8")
             self.assertIn("os.makedirs(os.path.dirname(os.path.abspath(OUT_FIG)), exist_ok=True)", sim_txt)
             snap_fig_txt = (stage / "code" / "scripts" / "misq_revision" / "generate_snap_figures.py").read_text(encoding="utf-8")
@@ -200,7 +209,7 @@ class TestZenodoReplicationPackage(unittest.TestCase):
                 self.assertIsNone(zf.testzip())
             utz.verify_archive_matches_stage(stage, zip_path)
 
-            # 2. Blind build with --omit-supplement-pdf works on any host (even without poppler)
+            # 2. Blind build (unhydrated) with --omit-supplement-pdf works on any host
             rc_blind = bzp.main([
                 "--mode", "blind",
                 "--version", "1.0.0",
@@ -214,6 +223,13 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             blind_stage = out_dir / "inattentiveness-screening-replication-blind-v1.0.0"
             self.assertFalse((blind_stage / ".zenodo.json").exists())
             self.assertFalse((blind_stage / "CITATION.cff").exists())
+            blind_readme = (blind_stage / "README.md").read_text(encoding="utf-8")
+            self.assertIn("(cd lean && lake build)", blind_readme)
+            self.assertEqual(blind_readme.count("\ncd code\n"), 1)
+            self.assertIn("**Prerequisite (`code/cache/`):**", blind_readme)
+            self.assertIn("REQUIRED when code/cache/ is not pre-hydrated", blind_readme)
+            self.assertIn("bash experiment_b/run_multiseed.sh", blind_readme)
+            self.assertIn("python -m experiment_b.linear_ae", blind_readme)
             manifest = json.loads((blind_stage / "MANIFEST.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["source_commits"].get("redacted_for_blind_review"))
             self.assertTrue(manifest["verification"]["passed"])
@@ -319,11 +335,16 @@ class TestZenodoReplicationPackage(unittest.TestCase):
                 'import os\nFIG = "/Users/iliastriantafyllopoulos/Documents/my_projects/inattentiveness_paper/figures"\n',
                 encoding="utf-8",
             )
+            sh1 = code_root / "experiment_b" / "run_tuning.sh"
+            sh1.write_text("#!/bin/bash\nsource venv_ae311/bin/activate\n", encoding="utf-8")
             notes = bzp.sanitize_code_paths(code_root, blind=True)
-            self.assertEqual(len(notes), 1)
+            self.assertEqual(len(notes), 2)
             rewritten = p1.read_text(encoding="utf-8")
             self.assertNotIn("/Users/", rewritten)
             self.assertIn('os.environ.get("FIG_DIR"', rewritten)
+            rewritten_sh = sh1.read_text(encoding="utf-8")
+            self.assertNotIn("venv_ae311", rewritten_sh)
+            self.assertIn("if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi", rewritten_sh)
 
     def test_upload_publish_guard_and_existing_deposition_reuse(self) -> None:
         # 1. Guard blocks --publish without explicit confirmation flag
