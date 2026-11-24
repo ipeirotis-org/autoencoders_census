@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Create a draft Zenodo deposit (and optionally reserve a DOI) from a built
-replication package without accidentally publishing before paper acceptance.
+"""Create, update, or publish a Zenodo deposit from a built replication package
+without accidentally minting a public DOI before paper acceptance or stranding a
+previously reserved DOI.
 
 Safety defaults:
   - Targets https://sandbox.zenodo.org by default (pass --production for zenodo.org).
   - Creates a PRIVATE DRAFT with a prereserved DOI; NEVER publishes unless both
     --publish and --yes-i-know-this-is-public-and-permanent are explicitly passed.
+  - Supports --deposition-id <ID> to update and publish a previously reserved draft
+    so its prereserved DOI becomes the live published DOI.
+  - Verifies that the ZIP archive matches the staged MANIFEST.json and passed all
+    verification checks before uploading anything.
   - Reads the API token strictly from ZENODO_TOKEN (never written to disk).
 
 Zero external dependencies: standard-library Python 3.10+.
@@ -18,6 +23,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -42,7 +48,8 @@ def api_json(
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Zenodo API {method} {url} failed ({exc.code}): {body}") from exc
@@ -69,13 +76,39 @@ def upload_file_to_bucket(bucket_url: str, file_path: Path, token: str) -> Dict[
         raise RuntimeError(f"Bucket PUT {file_path.name} failed ({exc.code}): {body}") from exc
 
 
+def verify_archive_matches_stage(stage_dir: Path, zip_file: Path) -> None:
+    """Ensure the ZIP archive is in sync with the staged MANIFEST.json and verified."""
+    manifest_path = stage_dir / "MANIFEST.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"Missing MANIFEST.json in {stage_dir}")
+    staged_bytes = manifest_path.read_bytes()
+    manifest = json.loads(staged_bytes.decode("utf-8"))
+    if not manifest.get("verification", {}).get("passed", False):
+        raise ValueError("Staged MANIFEST.json reports verification.passed != true; rebuild before uploading.")
+
+    expected_member = f"{stage_dir.name}/MANIFEST.json"
+    with zipfile.ZipFile(zip_file, "r") as zf:
+        if expected_member not in zf.namelist():
+            raise ValueError(f"Archive {zip_file.name} is missing {expected_member}; rebuild archives.")
+        archived_bytes = zf.read(expected_member)
+    if archived_bytes != staged_bytes:
+        raise ValueError(
+            f"Archive {zip_file.name} does not match staged {manifest_path}; rebuild without --skip-archives."
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Upload a built replication package to Zenodo as a draft.")
+    parser = argparse.ArgumentParser(description="Create, update, or publish a Zenodo deposit from a built package.")
     parser.add_argument(
         "--package-dir",
         type=Path,
         required=True,
         help="Path to the staged camera-ready directory (e.g. dist/zenodo/inattentiveness-screening-replication-v1.0.0)",
+    )
+    parser.add_argument(
+        "--deposition-id",
+        default=None,
+        help="Existing Zenodo draft deposition ID to update/publish (reuses its prereserved DOI)",
     )
     parser.add_argument(
         "--production",
@@ -104,17 +137,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    token = os.environ.get("ZENODO_TOKEN", "").strip()
-    if not token:
-        env_hint = "zenodo.org" if args.production else "sandbox.zenodo.org"
-        print(
-            f"[ERROR] ZENODO_TOKEN environment variable is not set.\n"
-            f"        Create a personal access token with deposit:write (and deposit:actions if publishing)\n"
-            f"        at https://{env_hint}/account/settings/applications/tokens/new/ and export ZENODO_TOKEN.",
-            file=sys.stderr,
-        )
-        return 1
-
     stage_dir = args.package_dir.resolve()
     meta_file = stage_dir / ".zenodo.json"
     zip_file = stage_dir.parent / f"{stage_dir.name}.zip"
@@ -126,14 +148,46 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[ERROR] Missing required artifact: {req_file}", file=sys.stderr)
             return 1
 
+    try:
+        verify_archive_matches_stage(stage_dir, zip_file)
+    except (ValueError, zipfile.BadZipFile) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    token = os.environ.get("ZENODO_TOKEN", "").strip()
+    if not token:
+        env_hint = "zenodo.org" if args.production else "sandbox.zenodo.org"
+        print(
+            f"[ERROR] ZENODO_TOKEN environment variable is not set.\n"
+            f"        Create a personal access token with deposit:write (and deposit:actions if publishing)\n"
+            f"        at https://{env_hint}/account/settings/applications/tokens/new/ and export ZENODO_TOKEN.",
+            file=sys.stderr,
+        )
+        return 1
+
     metadata = json.loads(meta_file.read_text(encoding="utf-8"))
     metadata["prereserve_doi"] = True
 
     base = PROD_BASE if args.production else SANDBOX_BASE
     env_label = "PRODUCTION (zenodo.org)" if args.production else "SANDBOX (sandbox.zenodo.org)"
-    print(f"[1/4] Creating draft deposition on {env_label}...")
-    dep = api_json("POST", f"{base}/deposit/depositions", token, payload={"metadata": metadata})
-    dep_id = dep["id"]
+
+    if args.deposition_id:
+        dep_id = str(args.deposition_id).strip()
+        print(f"[1/4] Loading existing draft deposition {dep_id} on {env_label}...")
+        dep = api_json("GET", f"{base}/deposit/depositions/{dep_id}", token)
+        if dep.get("submitted"):
+            print(
+                f"[ERROR] Deposition {dep_id} is already published (submitted=true). "
+                "Create a new version on Zenodo instead.",
+                file=sys.stderr,
+            )
+            return 1
+        dep = api_json("PUT", f"{base}/deposit/depositions/{dep_id}", token, payload={"metadata": metadata})
+    else:
+        print(f"[1/4] Creating new draft deposition on {env_label}...")
+        dep = api_json("POST", f"{base}/deposit/depositions", token, payload={"metadata": metadata})
+        dep_id = str(dep["id"])
+
     bucket_url = dep["links"]["bucket"]
     reserved_doi = dep.get("metadata", {}).get("prereserve_doi", {}).get("doi", "<unknown>")
     html_url = dep.get("links", {}).get("html", "")
@@ -146,14 +200,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     upload_file_to_bucket(bucket_url, sums_file, token)
     upload_file_to_bucket(bucket_url, readme_file, token)
 
+    receipt_path = stage_dir.parent / f"{stage_dir.name}.deposit.json"
+    receipt = {
+        "environment": "production" if args.production else "sandbox",
+        "deposition_id": dep_id,
+        "reserved_doi": reserved_doi,
+        "html_url": html_url,
+        "published": False,
+    }
+
     if args.publish:
-        print("[4/4] Publishing deposit...")
+        print(f"[4/4] Publishing deposition {dep_id}...")
         pub = api_json("POST", f"{base}/deposit/depositions/{dep_id}/actions/publish", token)
-        print(f"[DONE] Published! DOI: {pub.get('doi')} | URL: {pub.get('links', {}).get('record_html')}")
+        receipt["published"] = True
+        receipt["doi"] = pub.get("doi", reserved_doi)
+        receipt["record_html"] = pub.get("links", {}).get("record_html", html_url)
+        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        print(f"[DONE] Published! DOI: {receipt['doi']} | URL: {receipt['record_html']}")
     else:
+        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
         print("[4/4] Kept in PRIVATE DRAFT (safe for double-anonymous review).")
         print(f"[DONE] Review draft in browser: {html_url}")
-        print(f"       Reserved DOI (will resolve once published upon acceptance): {reserved_doi}")
+        print(f"       Reserved DOI (resolves once published): {reserved_doi}")
+        prod_flag = "--production " if args.production else ""
+        print(
+            f"       To publish THIS reserved draft upon acceptance:\n"
+            f"       python3 replication/upload_to_zenodo.py {prod_flag}--deposition-id {dep_id} \\\n"
+            f"         --publish --yes-i-know-this-is-public-and-permanent --package-dir {stage_dir}"
+        )
 
     return 0
 

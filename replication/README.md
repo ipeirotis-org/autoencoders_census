@@ -6,15 +6,23 @@ This directory builds, verifies, and (optionally) stages a Zenodo deposit for:
 
 ## 1. Build Both Archives Locally (Zero External Dependencies)
 
-From the repository root (`autoencoders_census/`):
+Ensure the paper evaluation harness branch is fetched if it is not yet merged into `main`:
+
+```bash
+git fetch origin revision/experiment-scripts
+```
+
+Then run from the repository root (`autoencoders_census/`):
 
 ```bash
 # Camera-ready Zenodo bundle (full metadata: .zenodo.json, CITATION.cff, live demo link)
 python3 replication/build_zenodo_package.py --mode camera-ready --version 1.0.0
 
-# Double-anonymous peer-review bundle (stripped metadata + automated zero-leak scan)
+# Double-anonymous peer-review bundle (stripped metadata + fail-closed text & PDF audit)
 python3 replication/build_zenodo_package.py --mode blind --version 1.0.0
 ```
+
+*(In `--mode blind`, the builder fails closed if `docs/MISQ_online_supplement.pdf` cannot be inspected for text and metadata leaks via `pdftotext`+`pdfinfo` or `pymupdf`; pass `--omit-supplement-pdf` on minimal hosts without PDF tooling.)*
 
 Outputs are written to `dist/zenodo/` (gitignored):
 - `inattentiveness-screening-replication-v1.0.0.zip` (recommended for Zenodo web preview)
@@ -52,11 +60,14 @@ python3 replication/upload_to_zenodo.py \
   --package-dir dist/zenodo/inattentiveness-screening-replication-v1.0.0
 ```
 
-Publish on production Zenodo **only upon acceptance** (or when instructed by the MISQ Research Transparency Editor):
+This prints your **Deposit ID** and **Reserved DOI** and saves them to `dist/zenodo/inattentiveness-screening-replication-v1.0.0.deposit.json`.
+
+Publish **that exact reserved draft** on production Zenodo **only upon acceptance** (or when instructed by the MISQ Research Transparency Editor), passing `--deposition-id <DEPOSITION_ID>` so the reserved DOI resolves to the published archive (rather than creating a duplicate deposit):
 
 ```bash
 python3 replication/upload_to_zenodo.py \
   --production \
+  --deposition-id <DEPOSITION_ID> \
   --publish \
   --yes-i-know-this-is-public-and-permanent \
   --package-dir dist/zenodo/inattentiveness-screening-replication-v1.0.0

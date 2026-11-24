@@ -169,6 +169,16 @@ BLIND_FORBIDDEN_PATTERNS = [
 ]
 
 
+REQUIRED_HARNESS_FILES = [
+    "code/evaluate/detection.py",
+    "code/evaluate/baselines.py",
+    "code/experiment_b/fairness.py",
+    "code/revision_experiments/lib_r2.py",
+    "code/scripts/misq_revision/run_all_snap_experiments.py",
+    "code/scripts/misq_revision/run_coherence_sim.py",
+]
+
+
 def run_git(repo: Path, args: List[str], check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -279,6 +289,29 @@ def sanitize_code_paths(code_root: Path, blind: bool) -> List[str]:
             txt = txt.replace(old, new)
             p3.write_text(txt, encoding="utf-8")
             notes.append("Parameterized LaTeX output path in code/experiment_b/generate_detailed_tables_draft.py")
+
+    p_sim = code_root / "scripts" / "misq_revision" / "run_coherence_sim.py"
+    if p_sim.exists():
+        txt = p_sim.read_text(encoding="utf-8")
+        old = '    fig.savefig(OUT_FIG, bbox_inches="tight")'
+        new = (
+            '    os.makedirs(os.path.dirname(os.path.abspath(OUT_FIG)), exist_ok=True)\n'
+            '    fig.savefig(OUT_FIG, bbox_inches="tight")'
+        )
+        if old in txt and "os.makedirs(os.path.dirname(os.path.abspath(OUT_FIG))" not in txt:
+            txt = txt.replace(old, new)
+            p_sim.write_text(txt, encoding="utf-8")
+            notes.append("Added parent directory creation before savefig in code/scripts/misq_revision/run_coherence_sim.py")
+
+    p_snap_fig = code_root / "scripts" / "misq_revision" / "generate_snap_figures.py"
+    if p_snap_fig.exists():
+        txt = p_snap_fig.read_text(encoding="utf-8")
+        old = 'FIG_DIR = os.environ.get("FIG_DIR", os.path.join(PAPER_DIR, "figures"))'
+        new = old + '\nos.makedirs(FIG_DIR, exist_ok=True)'
+        if old in txt and "os.makedirs(FIG_DIR, exist_ok=True)" not in txt:
+            txt = txt.replace(old, new, 1)
+            p_snap_fig.write_text(txt, encoding="utf-8")
+            notes.append("Added FIG_DIR directory creation in code/scripts/misq_revision/generate_snap_figures.py")
 
     p4 = code_root / "scripts" / "misq_revision" / "README.md"
     if p4.exists() and blind:
@@ -528,6 +561,7 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         PYTHONPATH=$PWD pytest tests/ -v
 
         # Reproduce Section 7.5 / Figure 5 controlled coherence simulation
+        mkdir -p ../outputs/figures
         FIG_DIR=../outputs/figures OUT_FIG=../outputs/figures/coherence_simulation.pdf \\
           python scripts/misq_revision/run_coherence_sim.py
 
@@ -555,6 +589,7 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         SNAP_REPO=$PWD python scripts/misq_revision/run_all_snap_experiments.py
 
         # Step 4: Regenerate figures into outputs/figures/
+        mkdir -p ../outputs/figures
         SNAP_REPO=$PWD FIG_DIR=../outputs/figures python scripts/misq_revision/generate_snap_figures.py
         ```
 
@@ -928,30 +963,107 @@ def verify_staged_package(stage_dir: Path, mode: str) -> Dict[str, object]:
                 if pat.search(txt):
                     blind_hits.append(f"{rel}: leaked {desc}")
 
-    # PDF metadata & text check in blind mode
+    # Required paper-evaluation harness completeness check (fail closed)
+    missing_harness = [
+        rel_req for rel_req in REQUIRED_HARNESS_FILES if not (stage_dir / rel_req).is_file()
+    ]
+
+    # Fail-closed PDF metadata & text check in blind mode
     supp_pdf = stage_dir / "docs" / "MISQ_online_supplement.pdf"
-    if mode == "blind" and supp_pdf.is_file() and shutil.which("pdftotext"):
-        proc = subprocess.run(
-            ["pdftotext", str(supp_pdf), "-"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        pdf_txt = proc.stdout.decode("utf-8", errors="replace")
-        for pat, desc in BLIND_FORBIDDEN_PATTERNS:
-            if pat.search(pdf_txt):
-                blind_hits.append(f"docs/MISQ_online_supplement.pdf: leaked {desc}")
+    if mode == "blind" and supp_pdf.is_file():
+        blind_hits.extend(_inspect_pdf_for_blind(supp_pdf))
 
     report = {
         "python_files_compiled": len(py_files),
         "python_compile_errors": py_errors,
+        "missing_harness_files": missing_harness,
         "lean_modules_checked": len(lean_files),
         "lean_issues": lean_issues,
         "secret_or_path_hits": secret_hits,
         "blind_anonymity_hits": blind_hits,
-        "passed": not (py_errors or lean_issues or secret_hits or blind_hits),
+        "passed": not (py_errors or missing_harness or lean_issues or secret_hits or blind_hits),
     }
     return report
+
+
+def _inspect_pdf_for_blind(pdf_path: Path) -> List[str]:
+    """Fail-closed inspection of PDF text and metadata for blind-review leaks."""
+    hits: List[str] = []
+    rel_label = "docs/MISQ_online_supplement.pdf"
+
+    # Defense-in-depth raw byte check for literal /Author metadata or forbidden tokens
+    raw_bytes = pdf_path.read_bytes()
+    raw_latin = raw_bytes.decode("latin1", errors="ignore")
+    for m in re.finditer(r"/Author\s*(?:\(([^)]*)\)|<([0-9A-Fa-f]*)>)", raw_latin):
+        val = (m.group(1) or m.group(2) or "").strip()
+        if val:
+            hits.append(f"{rel_label}: non-empty raw /Author metadata ({val!r})")
+    for pat, desc in BLIND_FORBIDDEN_PATTERNS:
+        if pat.search(raw_latin):
+            hits.append(f"{rel_label}: raw PDF bytes leaked {desc}")
+
+    # Path A: poppler-utils (pdftotext + pdfinfo)
+    pdftotext_bin = shutil.which("pdftotext")
+    pdfinfo_bin = shutil.which("pdfinfo")
+    if pdftotext_bin and pdfinfo_bin:
+        p_txt = subprocess.run(
+            [pdftotext_bin, str(pdf_path), "-"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        p_info = subprocess.run(
+            [pdfinfo_bin, str(pdf_path)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if p_txt.returncode != 0 or p_info.returncode != 0:
+            hits.append(
+                f"{rel_label}: PDF inspection failed (pdftotext rc={p_txt.returncode}, "
+                f"pdfinfo rc={p_info.returncode}); refusing unverified PDF in blind mode"
+            )
+            return hits
+        pdf_txt = p_txt.stdout.decode("utf-8", errors="replace")
+        info_txt = p_info.stdout.decode("utf-8", errors="replace")
+        for line in info_txt.splitlines():
+            if line.lower().startswith("author:") and line.split(":", 1)[1].strip():
+                hits.append(f"{rel_label}: non-empty PDF Author metadata ({line.strip()})")
+        for pat, desc in BLIND_FORBIDDEN_PATTERNS:
+            if pat.search(info_txt):
+                hits.append(f"{rel_label}: PDF metadata leaked {desc}")
+            if pat.search(pdf_txt):
+                hits.append(f"{rel_label}: PDF text leaked {desc}")
+        return hits
+
+    # Path B: PyMuPDF fallback if poppler-utils is not installed
+    try:
+        import fitz  # type: ignore
+    except ImportError:
+        hits.append(
+            f"{rel_label}: cannot verify PDF anonymity (neither poppler-utils [pdftotext+pdfinfo] "
+            "nor pymupdf is available); install them or pass --omit-supplement-pdf"
+        )
+        return hits
+
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            meta = doc.metadata or {}
+            author_val = (meta.get("author") or "").strip()
+            if author_val:
+                hits.append(f"{rel_label}: non-empty PDF Author metadata ({author_val!r})")
+            meta_blob = "\n".join(f"{k}: {v}" for k, v in meta.items() if v)
+            page_txt = "\n".join(page.get_text("text") for page in doc)
+    except Exception as exc:
+        hits.append(f"{rel_label}: pymupdf failed to inspect PDF ({exc}); refusing unverified PDF in blind mode")
+        return hits
+
+    for pat, desc in BLIND_FORBIDDEN_PATTERNS:
+        if pat.search(meta_blob):
+            hits.append(f"{rel_label}: PDF metadata leaked {desc}")
+        if pat.search(page_txt):
+            hits.append(f"{rel_label}: PDF text leaked {desc}")
+    return hits
 
 
 def write_checksums_and_manifest(
@@ -1090,6 +1202,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Output directory (default: <code-repo>/dist/zenodo)",
     )
+    parser.add_argument(
+        "--omit-supplement-pdf",
+        action="store_true",
+        help="Do not bundle docs/MISQ_online_supplement.pdf (useful in blind mode on hosts without PDF tools)",
+    )
     parser.add_argument("--skip-archives", action="store_true", help="Stage directory only; do not write .zip/.tar.gz")
     args = parser.parse_args(argv)
 
@@ -1101,6 +1218,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     suffix = "-blind" if args.mode == "blind" else ""
     pkg_name = f"inattentiveness-screening-replication{suffix}-v{args.version}"
     stage_dir = out_dir / pkg_name
+    # Always invalidate previous archives when replacing the staged directory so
+    # --skip-archives or a failed rebuild can never leave stale ZIP/tar artifacts
+    # paired with a newer MANIFEST.json / SHA256SUMS.txt.
+    for stale_path in (
+        out_dir / f"{pkg_name}.zip",
+        out_dir / f"{pkg_name}.tar.gz",
+        out_dir / f"{pkg_name}.zenodo.json",
+    ):
+        if stale_path.exists():
+            stale_path.unlink()
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     stage_dir.mkdir(parents=True)
@@ -1138,12 +1265,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for rel in OVERLAY_PATHS:
             extract_git_path(code_repo, exp_sha, rel, code_root)
     else:
-        print(
-            "[WARN] Could not locate revision/experiment-scripts git ref; copying dataset/, model/, "
-            "evaluate/, utils.py from working tree only.",
-            file=sys.stderr,
-        )
-        for rel in ("dataset", "model", "evaluate"):
+        for rel in ("dataset", "model", "evaluate", "experiment_b", "revision_experiments"):
             if (code_repo / rel).is_dir():
                 copy_tree_clean(code_repo / rel, code_root / rel)
         if (code_repo / "utils.py").is_file():
@@ -1180,11 +1302,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise FileNotFoundError(f"Lean 4 directory not found at {lean_src}")
     copy_tree_clean(lean_src, stage_dir / "lean")
 
-    # 6. Copy unreviewed technical supplement PDF
+    # 6. Copy unreviewed technical supplement PDF (unless --omit-supplement-pdf)
     docs_dir = stage_dir / "docs"
     docs_dir.mkdir()
     supp_pdf = paper_repo / "MISQ_online_supplement.pdf"
-    if supp_pdf.is_file():
+    if not args.omit_supplement_pdf and supp_pdf.is_file():
         shutil.copy2(supp_pdf, docs_dir / "MISQ_online_supplement.pdf")
 
     # 7. Optional hydration from restored 2026-10-23 paper-data snapshot
@@ -1242,8 +1364,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if not verification["passed"]:
+        stale_meta = out_dir / f"{pkg_name}.zenodo.json"
+        if stale_meta.exists():
+            stale_meta.unlink()
         print("[FAIL] Verification checks failed:", file=sys.stderr)
         print(json.dumps(verification, indent=2), file=sys.stderr)
+        if verification.get("missing_harness_files"):
+            print(
+                "[HINT] Fetch the paper evaluation harness branch first:\n"
+                "       git fetch origin revision/experiment-scripts\n"
+                "       or pass --experiment-ref <git-ref>.",
+                file=sys.stderr,
+            )
         return 1
 
     print(f"[OK] Staged {pkg_name} -> {stage_dir}")
