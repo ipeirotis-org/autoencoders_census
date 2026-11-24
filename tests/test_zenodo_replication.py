@@ -139,12 +139,13 @@ def _make_stub_repos(tmp: Path, include_harness: bool = True, pdf_author: str = 
     )
     (paper_repo / "MISQ_online_supplement.pdf").write_bytes(_make_minimal_valid_pdf(author=pdf_author))
 
-    # Minimal snapshot for hydration test (score caches + heavy weights + third-party CSV)
+    # Minimal snapshot for hydration test (score caches + derived CSV + heavy weights + third-party CSV)
     (snap_dir / "cache" / "_fix9_inattentive_cl").mkdir(parents=True, exist_ok=True)
     (snap_dir / "cache" / "_fix9_inattentive_cl" / "errors.csv").write_text("row,pct\n0,0.5\n", encoding="utf-8")
     (snap_dir / "cache" / "_tuned_inattentive_ae" / "autoencoder").mkdir(parents=True, exist_ok=True)
     (snap_dir / "cache" / "_tuned_inattentive_ae" / "best_hyperparameters.yaml").write_text("latent_space_dim: 4\n", encoding="utf-8")
     (snap_dir / "cache" / "_tuned_inattentive_ae" / "autoencoder" / "saved_model.pb").write_bytes(b"heavy-weights")
+    (snap_dir / "sample_size_results.csv").write_text("dataset,N,seed,AE_AUC,CL_AUC\ninattentive,100,1,0.7,0.75\n", encoding="utf-8")
     (snap_dir / "data").mkdir(parents=True, exist_ok=True)
     (snap_dir / "data" / "inattentive_users.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
@@ -158,7 +159,7 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             code_repo, paper_repo, snap_dir = _make_stub_repos(tmp)
             out_dir = tmp / "out"
 
-            # 1. Camera-ready build with snapshot score-cache hydration (no raw CSVs / weights)
+            # 1. Camera-ready build with snapshot score-cache + sample_size_results.csv hydration
             rc = bzp.main([
                 "--mode", "camera-ready",
                 "--version", "1.0.0",
@@ -174,6 +175,7 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             self.assertTrue((stage / "CITATION.cff").is_file())
             self.assertTrue((stage / "code" / "cache" / "_fix9_inattentive_cl" / "errors.csv").is_file())
             self.assertTrue((stage / "code" / "cache" / "_tuned_inattentive_ae" / "best_hyperparameters.yaml").is_file())
+            self.assertTrue((stage / "code" / "sample_size_results.csv").is_file())
             # Heavy weights and third-party raw CSVs stay excluded by default
             self.assertFalse((stage / "code" / "cache" / "_tuned_inattentive_ae" / "autoencoder" / "saved_model.pb").exists())
             self.assertFalse((stage / "code" / "data" / "inattentive_users.csv").exists())
@@ -187,9 +189,10 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             self.assertIn("mkdir -p ../outputs/figures", readme_txt)
             self.assertIn("(cd lean && lake build)", readme_txt)
             self.assertEqual(readme_txt.count("\ncd code\n"), 1)
-            self.assertIn("optional when code/cache/ is already hydrated", readme_txt)
+            self.assertIn("optional when code/cache/ and sample_size_results.csv are pre-hydrated", readme_txt)
             self.assertIn("bash experiment_b/run_multiseed.sh", readme_txt)
             self.assertIn("python -m experiment_b.linear_ae", readme_txt)
+            self.assertIn("python -m experiment_b.sample_size", readme_txt)
             self.assertNotIn("run_linear.sh", readme_txt)
             sim_txt = (stage / "code" / "scripts" / "misq_revision" / "run_coherence_sim.py").read_text(encoding="utf-8")
             self.assertIn("os.makedirs(os.path.dirname(os.path.abspath(OUT_FIG)), exist_ok=True)", sim_txt)
@@ -209,6 +212,25 @@ class TestZenodoReplicationPackage(unittest.TestCase):
                 self.assertIsNone(zf.testzip())
             utz.verify_archive_matches_stage(stage, zip_path)
 
+            # 1b. Hydrated snapshot WITHOUT sample_size_results.csv must mark Step 5b REQUIRED
+            (snap_dir / "sample_size_results.csv").unlink()
+            out_dir_partial = tmp / "out_partial"
+            rc_partial = bzp.main([
+                "--mode", "camera-ready",
+                "--version", "1.0.0",
+                "--code-repo", str(code_repo),
+                "--paper-repo", str(paper_repo),
+                "--snapshot-dir", str(snap_dir),
+                "--output-dir", str(out_dir_partial),
+                "--skip-archives",
+            ])
+            self.assertEqual(rc_partial, 0)
+            partial_readme = (
+                out_dir_partial / "inattentiveness-screening-replication-v1.0.0" / "README.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("**Prerequisite (`code/sample_size_results.csv`):**", partial_readme)
+            self.assertIn("Step 5b (REQUIRED when sample_size_results.csv is not bundled)", partial_readme)
+
             # 2. Blind build (unhydrated) with --omit-supplement-pdf works on any host
             rc_blind = bzp.main([
                 "--mode", "blind",
@@ -226,10 +248,14 @@ class TestZenodoReplicationPackage(unittest.TestCase):
             blind_readme = (blind_stage / "README.md").read_text(encoding="utf-8")
             self.assertIn("(cd lean && lake build)", blind_readme)
             self.assertEqual(blind_readme.count("\ncd code\n"), 1)
-            self.assertIn("**Prerequisite (`code/cache/`):**", blind_readme)
-            self.assertIn("REQUIRED when code/cache/ is not pre-hydrated", blind_readme)
+            self.assertIn("**Prerequisites (`code/cache/` & `code/sample_size_results.csv`):**", blind_readme)
+            self.assertIn(
+                "REQUIRED when code/cache/ and sample_size_results.csv are not pre-hydrated",
+                blind_readme,
+            )
             self.assertIn("bash experiment_b/run_multiseed.sh", blind_readme)
             self.assertIn("python -m experiment_b.linear_ae", blind_readme)
+            self.assertIn("python -m experiment_b.sample_size", blind_readme)
             manifest = json.loads((blind_stage / "MANIFEST.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["source_commits"].get("redacted_for_blind_review"))
             self.assertTrue(manifest["verification"]["passed"])

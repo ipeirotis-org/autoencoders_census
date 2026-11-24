@@ -136,6 +136,15 @@ SCORE_CACHE_ALLOW_FILENAMES = {
     "averages.csv",
 }
 
+# Derived root-level experiment CSVs (aggregate metrics only, no raw survey rows)
+# eligible for hydration from --snapshot-dir into code/.
+DERIVED_SNAPSHOT_CSVS = [
+    "sample_size_results.csv",
+    "pl_sweep_results.csv",
+    "linear_ae_lift.csv",
+    "reconstruction_table.csv",
+]
+
 SKIP_DIR_NAMES = {
     "__pycache__",
     ".pytest_cache",
@@ -385,11 +394,12 @@ def hydrate_from_snapshot(
     include_third_party_raw: bool,
     include_weights: bool,
 ) -> Dict[str, object]:
-    """Hydrate precomputed score caches (and optionally raw CSVs) from a snapshot."""
+    """Hydrate precomputed score caches, derived CSVs (and optionally raw CSVs) from a snapshot."""
     summary: Dict[str, object] = {
         "hydrated": True,
         "snapshot_dir": str(snapshot_dir),
         "cache_files_copied": 0,
+        "derived_csvs_copied": [],
         "raw_csvs_copied": [],
         "weights_included": include_weights,
     }
@@ -411,6 +421,14 @@ def hydrate_from_snapshot(
                 shutil.copy2(Path(root) / fname, target)
                 count += 1
         summary["cache_files_copied"] = count
+
+    copied_derived: List[str] = []
+    for derived_name in DERIVED_SNAPSHOT_CSVS:
+        cand = snapshot_dir / derived_name
+        if cand.is_file():
+            shutil.copy2(cand, code_root / derived_name)
+            copied_derived.append(derived_name)
+    summary["derived_csvs_copied"] = copied_derived
 
     if include_third_party_raw:
         src_data = snapshot_dir / "data"
@@ -449,10 +467,19 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
         """)
     )
 
+    derived_csvs = set(hydration.get("derived_csvs_copied") or [])
+    has_sample_size_csv = "sample_size_results.csv" in derived_csvs
+
     if hydration.get("hydrated"):
+        derived_note = (
+            f" and {len(derived_csvs)} derived experiment summary CSV(s) "
+            f"({', '.join(f'`code/{n}`' for n in sorted(derived_csvs))})"
+            if derived_csvs
+            else ""
+        )
         cache_note = (
             f"This archive **includes** {hydration['cache_files_copied']} hydrated score-cache and "
-            "hyperparameter-tuning files under `code/cache/` for exact score-level reproduction."
+            f"hyperparameter-tuning files under `code/cache/`{derived_note} for exact score-level reproduction."
         )
     else:
         cache_note = (
@@ -464,48 +491,82 @@ def build_readme(mode: str, version: str, hydration: Dict[str, object], pkg_name
             "redistributed directly without confirming per-source licenses; see `DATA_PROVENANCE.md` "
             "for canonical DOIs/URLs and exact placement paths under `code/data/`. Re-running "
             "`replication/build_zenodo_package.py --snapshot-dir <path>` hydrates the full "
-            "per-respondent score caches (`code/cache/`) for exact score-level replay."
+            "per-respondent score caches (`code/cache/`) and derived experiment CSVs "
+            "(`code/sample_size_results.csv`, etc.) for exact score-level replay."
         )
 
-    if hydration.get("hydrated"):
+    if hydration.get("hydrated") and has_sample_size_csv:
         step5_cache_note = (
-            "This archive already ships hydrated `code/cache/` score caches and tuned configs, so "
-            "Steps 5a–5b are optional (only needed if retraining models from scratch)."
+            "This archive already ships hydrated `code/cache/` score caches, tuned configs, and "
+            "`code/sample_size_results.csv`, so Steps 5a–5b are optional (only needed if retraining "
+            "models or regenerating learning curves from scratch)."
         )
-        step5_prefix = "# Steps 5a-5b (optional when code/cache/ is already hydrated): refit from scratch"
+        step5_commands = textwrap.dedent("""\
+            # Run from code/ with .venv active
+            # Steps 5a-5b (optional when code/cache/ and sample_size_results.csv are pre-hydrated): refit from scratch
+            for ds in attention_check bot_bot_mturk inattentive moral_data mturk_ethics pennycook_1 public_opinion racial_data; do
+              python main.py chow_liu_outliers --data "$ds" --output "cache/_fix9_${ds}_cl/"
+            done
+            bash experiment_b/run_tuning.sh
+            bash experiment_b/run_finalize.sh
+            bash experiment_b/run_multiseed.sh
+            python -m experiment_b.linear_ae
+            python -m experiment_b.sample_size""")
+    elif hydration.get("hydrated"):
+        step5_cache_note = (
+            "**Prerequisite (`code/sample_size_results.csv`):** This archive ships hydrated `code/cache/` "
+            "score caches and tuned configs (so Step 5a model refits are optional), **but** "
+            "`code/sample_size_results.csv` was not present in the snapshot. Both `run_all_snap_experiments.py` "
+            "and `generate_snap_figures.py` read `sample_size_results.csv`, so you **must** run Step 5b "
+            "(`python -m experiment_b.sample_size`) before executing Steps 5c–5d."
+        )
+        step5_commands = textwrap.dedent("""\
+            # Run from code/ with .venv active
+            # Step 5a (optional when code/cache/ is pre-hydrated): refit detector caches from scratch
+            for ds in attention_check bot_bot_mturk inattentive moral_data mturk_ethics pennycook_1 public_opinion racial_data; do
+              python main.py chow_liu_outliers --data "$ds" --output "cache/_fix9_${ds}_cl/"
+            done
+            bash experiment_b/run_tuning.sh
+            bash experiment_b/run_finalize.sh
+            bash experiment_b/run_multiseed.sh
+            python -m experiment_b.linear_ae
+
+            # Step 5b (REQUIRED when sample_size_results.csv is not bundled): generate learning-curve CSV
+            python -m experiment_b.sample_size""")
     else:
         step5_cache_note = (
-            "**Prerequisite (`code/cache/`):** `run_all_snap_experiments.py` and "
-            "`generate_snap_figures.py` read tuned hyperparameters (`cache/_tuned_<ds>_ae/best_hyperparameters.yaml`) "
-            "and detector score caches (`cache/_fix9_<ds>_cl/errors.csv`, `cache/_tuned_<ds>_ae_p{85,100}/errors.csv`, "
-            "`cache/_ms_<ds>_p{85,100}_s{1..5}/errors.csv`, `cache/_lin0_<ds>/errors.csv`). Because this archive "
-            "was built without `--snapshot-dir`, you **must** run Steps 5a–5b first (or rebuild with `--snapshot-dir` "
-            "against the score-cache snapshot) before executing Steps 5c–5d."
+            "**Prerequisites (`code/cache/` & `code/sample_size_results.csv`):** `run_all_snap_experiments.py` and "
+            "`generate_snap_figures.py` read tuned hyperparameters (`cache/_tuned_<ds>_ae/best_hyperparameters.yaml`), "
+            "detector score caches (`cache/_fix9_<ds>_cl/errors.csv`, `cache/_tuned_<ds>_ae_p{85,100}/errors.csv`, "
+            "`cache/_ms_<ds>_p{85,100}_s{1..5}/errors.csv`, `cache/_lin0_<ds>/errors.csv`), and the sample-size "
+            "learning-curve table (`sample_size_results.csv`). Because this archive was built without "
+            "`--snapshot-dir`, you **must** run Steps 5a–5b first (or rebuild with `--snapshot-dir` against the "
+            "snapshot) before executing Steps 5c–5d."
         )
-        step5_prefix = "# Steps 5a-5b (REQUIRED when code/cache/ is not pre-hydrated): populate code/cache/"
+        step5_commands = textwrap.dedent("""\
+            # Run from code/ with .venv active
+            # Steps 5a-5b (REQUIRED when code/cache/ and sample_size_results.csv are not pre-hydrated): populate caches & learning-curve CSV
+            for ds in attention_check bot_bot_mturk inattentive moral_data mturk_ethics pennycook_1 public_opinion racial_data; do
+              python main.py chow_liu_outliers --data "$ds" --output "cache/_fix9_${ds}_cl/"
+            done
+            bash experiment_b/run_tuning.sh
+            bash experiment_b/run_finalize.sh
+            bash experiment_b/run_multiseed.sh
+            python -m experiment_b.linear_ae
+            python -m experiment_b.sample_size""")
 
-    step5_block = textwrap.dedent(f"""\
-        {step5_cache_note}
-
-        ```bash
-        # Run from code/ with .venv active
-        {step5_prefix}
-        for ds in attention_check bot_bot_mturk inattentive moral_data mturk_ethics pennycook_1 public_opinion racial_data; do
-          python main.py chow_liu_outliers --data "$ds" --output "cache/_fix9_${{ds}}_cl/"
-        done
-        bash experiment_b/run_tuning.sh
-        bash experiment_b/run_finalize.sh
-        bash experiment_b/run_multiseed.sh
-        python -m experiment_b.linear_ae
-
-        # Step 5c: Run unified 9-survey ablations, classical one-hot baselines,
-        # fairness audits, sample-size curves, and downstream analyses
-        SNAP_REPO=$PWD python scripts/misq_revision/run_all_snap_experiments.py
-
-        # Step 5d: Regenerate figures into ../outputs/figures/
-        mkdir -p ../outputs/figures
-        SNAP_REPO=$PWD FIG_DIR=../outputs/figures python scripts/misq_revision/generate_snap_figures.py
-        ```""")
+    step5_block = (
+        f"{step5_cache_note}\n\n"
+        "```bash\n"
+        f"{step5_commands}\n\n"
+        "# Step 5c: Run unified 9-survey ablations, classical one-hot baselines,\n"
+        "# fairness audits, sample-size curves, and downstream analyses\n"
+        "SNAP_REPO=$PWD python scripts/misq_revision/run_all_snap_experiments.py\n\n"
+        "# Step 5d: Regenerate figures into ../outputs/figures/\n"
+        "mkdir -p ../outputs/figures\n"
+        "SNAP_REPO=$PWD FIG_DIR=../outputs/figures python scripts/misq_revision/generate_snap_figures.py\n"
+        "```"
+    )
 
     body = textwrap.dedent(f"""\
         # Replication Package: *{PAPER_TITLE}*
@@ -1146,7 +1207,11 @@ def write_checksums_and_manifest(
             }
         ),
         "hydration": (
-            {"hydrated": bool(hydration.get("hydrated")), "cache_files_copied": hydration.get("cache_files_copied", 0)}
+            {
+                "hydrated": bool(hydration.get("hydrated")),
+                "cache_files_copied": hydration.get("cache_files_copied", 0),
+                "derived_csvs_copied": hydration.get("derived_csvs_copied", []),
+            }
             if mode == "blind"
             else hydration
         ),
@@ -1352,6 +1417,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     hydration: Dict[str, object] = {
         "hydrated": False,
         "cache_files_copied": 0,
+        "derived_csvs_copied": [],
         "raw_csvs_copied": [],
         "weights_included": False,
     }
