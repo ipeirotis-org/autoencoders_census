@@ -24,10 +24,12 @@ import {
   validateUploadUrl,
   validateStartJob,
   VALID_MODEL_PRESETS,
+  VALID_MODEL_TYPES,
 } from '../middleware/validation';
 import { generateSafeFilename } from '../utils/fileValidation';
 import { sanitizeFormulaInjection } from '../utils/csvSanitization';
 import { MODEL_PRESETS } from '../utils/modelPresets';
+import { MODEL_METHODS } from '../utils/modelMethods';
 import { logger } from '../config/logger';
 import { env } from '../config/env';
 import { storage, firestore, pubsub } from '../config/gcp-clients';
@@ -60,20 +62,18 @@ const RESUMABLE_STATUSES = new Set([
   "scoring",
 ]);
 
-// 0. List Available Model Presets (TASKS.md 3.2)
+// 0. List Available Detection Methods & Model Presets (TASKS.md 3.2)
 //
-// Returns the metadata for the upload-time model preset dropdown.
-// Public endpoint (no auth) because (a) the frontend needs to render
-// the dropdown before the user logs in if they bookmark a deep link,
-// and (b) the response is static catalog data with no per-user
-// content. Mirrors `model.presets.list_presets()` in Python — see
-// `frontend/server/utils/modelPresets.ts` for the synchronization
-// contract.
+// Returns the metadata for the upload-time detection method selector and
+// autoencoder model preset dropdown. Public endpoint (no auth) because
+// (a) the frontend needs to render the controls cleanly and (b) the
+// response is static catalog data with no per-user content. Mirrors
+// `model.presets.list_presets()` and `model.presets.list_model_types()`.
 //
 // IMPORTANT: this MUST be registered before any `/:id` patterns so a
 // future GET /:id route doesn't accidentally swallow it.
 router.get("/presets", (_req, res) => {
-  res.json({ presets: MODEL_PRESETS });
+  res.json({ presets: MODEL_PRESETS, methods: MODEL_METHODS });
 });
 
 // 1. Get Signed URL for Upload
@@ -113,7 +113,7 @@ router.post("/upload-url", requireAuth, uploadUrlLimiter, validateUploadUrl, asy
 // 2. Start Processing (Trigger Pub/Sub)
 router.post("/start-job", requireAuth, uploadLimiter, validateStartJob, async (req, res) => {
   try {
-    const { jobId, gcsFileName, modelPreset } = req.body;
+    const { jobId, gcsFileName, modelPreset, modelType } = req.body;
     const userId = (req as any).user.id;
 
     // Authorization: ensure the caller owns the file path.
@@ -125,47 +125,42 @@ router.post("/start-job", requireAuth, uploadLimiter, validateStartJob, async (r
       return res.status(403).json({ error: "Forbidden: file path does not belong to caller" });
     }
 
-    // TASKS.md 3.2: optional model preset chosen via the dropdown.
-    // validateStartJob has already enforced the allowlist when the
-    // field is present.
-    //
-    // Two different "resolved" values here intentionally:
-    //
-    //   - `presetForDoc`: what we persist on the Firestore job doc for
-    //     display. Defaults to 'auto' when the client omits the field
-    //     so the frontend can always render a deterministic value on
-    //     the progress page.
-    //
-    //   - `presetForMessage`: what we forward through Pub/Sub to the
-    //     worker. Deliberately `undefined` when the client didn't pick
-    //     a concrete preset (missing OR 'auto'). The reason is the
-    //     rolling-deploy compat contract for the Vertex trainer
-    //     image: `_build_vertex_training_args` only emits
-    //     `--model-preset=<name>` when the value is non-None, so an
-    //     older `train/task.py` (pre-`--model-preset` support) still
-    //     parses the arg list cleanly during a mixed-version
-    //     deployment. If we eagerly defaulted to 'auto' in the Pub/Sub
-    //     message, the worker would always forward
-    //     `--model-preset=auto` and an old trainer would exit on the
-    //     unknown CLI arg. Semantically this is a no-op for the
-    //     trainer: `build_model_config(None, ...)` and
-    //     `build_model_config('auto', ...)` both resolve the same way
-    //     via `auto_select_preset`, so sending no flag is equivalent
-    //     to sending `--model-preset=auto` on a new trainer — but
-    //     only the "no flag" variant survives a rolling deploy
-    //     (Codex P1 r#50).
+    // Detection method chosen via the UI selector ('autoencoder' or 'chow_liu').
+    // Rolling-deploy compat: omit `modelType` from the Pub/Sub message when it
+    // is the legacy default ('autoencoder') so an older worker/trainer image
+    // parses cleanly during mixed-version deploys.
+    const clientModelType =
+      typeof modelType === 'string' && (VALID_MODEL_TYPES as readonly string[]).includes(modelType)
+        ? modelType
+        : undefined;
+    const modelTypeForDoc = clientModelType ?? 'autoencoder';
+    const modelTypeForMessage =
+      clientModelType && clientModelType !== 'autoencoder' ? clientModelType : undefined;
+
+    // TASKS.md 3.2: optional autoencoder preset chosen via the dropdown.
+    // Chow-Liu is closed-form and has no neural-network size preset, so we
+    // omit modelPreset from both the Firestore doc and Pub/Sub message when
+    // modelTypeForDoc === 'chow_liu'.
     const clientPreset =
-      typeof modelPreset === 'string' && (VALID_MODEL_PRESETS as readonly string[]).includes(modelPreset)
+      modelTypeForDoc === 'autoencoder' &&
+      typeof modelPreset === 'string' &&
+      (VALID_MODEL_PRESETS as readonly string[]).includes(modelPreset)
         ? modelPreset
         : undefined;
-    const presetForDoc = clientPreset ?? 'auto';
-    const presetForMessage = clientPreset && clientPreset !== 'auto' ? clientPreset : undefined;
+    const presetForDoc = modelTypeForDoc === 'autoencoder' ? (clientPreset ?? 'auto') : undefined;
+    const presetForMessage =
+      modelTypeForDoc === 'autoencoder' && clientPreset && clientPreset !== 'auto'
+        ? clientPreset
+        : undefined;
 
     const messageJson: Record<string, unknown> = {
       jobId: jobId,
       bucket: BUCKET_NAME,
       file: gcsFileName,
     };
+    if (modelTypeForMessage !== undefined) {
+      messageJson.modelType = modelTypeForMessage;
+    }
     if (presetForMessage !== undefined) {
       messageJson.modelPreset = presetForMessage;
     }
@@ -178,20 +173,19 @@ router.post("/start-job", requireAuth, uploadLimiter, validateStartJob, async (r
     let claimedExistingDoc = false;
     let existingStatus: string | undefined;
     try {
-      await firestore.collection("jobs").doc(jobId).create({
+      const jobDoc: Record<string, unknown> = {
         status: "queued",
         createdAt: new Date(),
         userId,
         gcsFileName,
-        // Persist the requested preset on the job doc so the frontend
-        // can show "model: medium (auto)" while the worker is still
-        // running. The worker overwrites this with the resolved preset
-        // (small/medium/large) once it has cleaned the input. Uses
-        // `presetForDoc` (which defaults to 'auto') rather than
-        // `presetForMessage` (which is undefined on auto) — the job
-        // doc is display state, not wire state.
-        modelPresetRequested: presetForDoc,
-      });
+        modelType: modelTypeForDoc,
+      };
+      if (presetForDoc !== undefined) {
+        // Persist the requested preset on the job doc so the frontend can
+        // show "Autoencoder (medium · auto)" while running / complete.
+        jobDoc.modelPresetRequested = presetForDoc;
+      }
+      await firestore.collection("jobs").doc(jobId).create(jobDoc);
     } catch (createErr: any) {
       if (createErr?.code !== 6) {
         throw createErr;

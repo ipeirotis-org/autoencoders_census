@@ -174,27 +174,80 @@ class CLTree:
         self._estimate_params(X)
         return self
 
-    def log_likelihood(self, df: pd.DataFrame) -> np.ndarray:
+    def per_column_nll(self, df: pd.DataFrame) -> np.ndarray:
         """
-        Vectorized per-row log-likelihood under the learned tree.
+        Vectorized per-row, per-column negative log-likelihood (nats) under
+        the learned Chow–Liu tree.
+
+        Returns an array of shape ``(N, d)`` aligned with ``self.columns``
+        where entry ``[i, j]`` is ``-log P(X_j = x_{i,j} | X_{parent(j)})``
+        (or ``-log P(X_root = x_{i,root})`` for the root). Summing across
+        columns recovers ``-self.log_likelihood(df)``.
         """
         X = self._df_to_ints(df)
         N, d = X.shape
-        logp = np.zeros(N, dtype=np.float64)
+        nll = np.zeros((N, d), dtype=np.float64)
+        if d == 0 or N == 0:
+            return nll
+        col_idx = {c: j for j, c in enumerate(self.columns)}
         # root term
-        r = self.root; rj = self.columns.index(r)
-        pr = np.clip(self.p_root[r], 1e-12, None)
-        logp += np.log(pr[X[:, rj]])
+        r = self.root
+        rj = col_idx[r]
+        pr = np.clip(self.p_root[r], 1e-12, 1.0)
+        nll[:, rj] = np.maximum(-np.log(pr[X[:, rj]]), 0.0)
         # child terms
         for c in self.columns:
             p = self.parent.get(c, None)
             if p is None:
                 continue
-            cj = self.columns.index(c)
-            pj = self.columns.index(p)
-            table = np.clip(self.cpt[(c, p)], 1e-12, None)  # [Kp, Kc]
-            logp += np.log(table[X[:, pj], X[:, cj]])
-        return logp
+            cj = col_idx[c]
+            pj = col_idx[p]
+            table = np.clip(self.cpt[(c, p)], 1e-12, 1.0)  # [Kp, Kc]
+            nll[:, cj] = np.maximum(-np.log(table[X[:, pj], X[:, cj]]), 0.0)
+        return nll
+
+    def log_likelihood(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Vectorized per-row log-likelihood under the learned tree.
+        """
+        return -self.per_column_nll(df).sum(axis=1)
+
+    def compute_per_column_contributions(
+        self, df: pd.DataFrame
+    ) -> List[List[Tuple[str, float]]]:
+        """
+        Decompose each row's Chow–Liu negative log-likelihood into per-column
+        percentage contributions sorted descending (summing to 100%).
+        """
+        nll = self.per_column_nll(df)
+        return [
+            per_column_contributions_from_nll(nll[i], self.columns)
+            for i in range(nll.shape[0])
+        ]
+
+    def predict_most_likely(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Predict the most likely (MAP) category for each cell given the fitted
+        tree: marginal mode for the root and conditional mode given each
+        row's observed parent value for every child column.
+        """
+        X = self._df_to_ints(df)
+        N = X.shape[0]
+        col_idx = {c: j for j, c in enumerate(self.columns)}
+        out_cols: Dict[str, List[str]] = {}
+        for c in self.columns:
+            spec = self.specs[c]
+            p = self.parent.get(c, None)
+            if p is None:
+                best = spec.idx2cat[int(np.argmax(self.p_root[c]))]
+                out_cols[c] = [best] * N
+            else:
+                pj = col_idx[p]
+                table = self.cpt[(c, p)]  # [Kp, Kc]
+                best_idx = np.argmax(table[X[:, pj]], axis=1)
+                idx2cat = spec.idx2cat
+                out_cols[c] = [idx2cat[int(k)] for k in best_idx]
+        return pd.DataFrame(out_cols, index=df.index)
 
     def score_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -231,7 +284,36 @@ class CLTree:
         """
         return list(self.mi_edges)
 
-# --------------- convenience function ---------------
+# --------------- convenience functions ---------------
+
+def per_column_contributions_from_nll(
+    nll_row: np.ndarray, columns: List[str]
+) -> List[Tuple[str, float]]:
+    """
+    Convert a 1-D vector of per-column negative log-likelihoods into sorted
+    ``(column, percentage)`` contribution tuples summing to 100%.
+    """
+    n_cols = len(columns)
+    if n_cols == 0:
+        return []
+    vals = np.asarray(nll_row, dtype=np.float64)
+    total = float(vals.sum())
+    if not np.isfinite(total) or total < 1e-10:
+        contributions = [(col, 100.0 / n_cols) for col in columns]
+    else:
+        contributions = [
+            (col, float(vals[i] / total * 100.0))
+            for i, col in enumerate(columns)
+        ]
+    total_pct = sum(pct for _, pct in contributions)
+    if total_pct > 0:
+        contributions = [
+            (col, float(pct / total_pct * 100.0))
+            for col, pct in contributions
+        ]
+    contributions.sort(key=lambda x: x[1], reverse=True)
+    return contributions
+
 
 def rank_rows_by_chow_liu(df: pd.DataFrame,
                           alpha: float = 1.0,

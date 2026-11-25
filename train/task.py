@@ -20,10 +20,12 @@ import numpy as np
 import pandas as pd
 from google.cloud import storage, firestore
 from dataset.loader import DataLoader, DEFAULT_MAX_UNIQUE_VALUES
-from evaluate.outliers import compute_reconstruction_error
-from features.transform import Table2Vector
-from model.autoencoder import AutoencoderModel
-from model.presets import build_model_config, normalize_preset_name
+from model.presets import (
+    MODEL_TYPE_CHOW_LIU,
+    build_model_config,
+    normalize_model_type,
+    normalize_preset_name,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -67,6 +69,7 @@ def train_and_predict(
     file_path,
     max_unique_values=None,
     model_preset=None,
+    model_type=None,
 ):
     """Run the end-to-end Vertex training pipeline.
 
@@ -88,13 +91,18 @@ def train_and_predict(
         model_preset: Optional preset id from :mod:`model.presets`
             (auto/small/medium/large). Forwarded by
             ``worker.process_upload_vertex`` via the
-            ``--model-preset`` CLI flag (TASKS.md 3.2). ``None`` and
-            unknown values are normalized to ``auto`` by
-            ``build_model_config``, which then resolves it to a
-            concrete preset based on the cleaned input shape.
+            ``--model-preset`` CLI flag (TASKS.md 3.2). Used only when
+            ``model_type`` resolves to ``autoencoder``.
+        model_type: Optional detection method id from :mod:`model.presets`
+            (``autoencoder`` or ``chow_liu``). Forwarded by
+            ``worker.process_upload_vertex`` via ``--model-type``.
+            ``None`` and unknown values normalize to ``autoencoder``.
     """
     try:
-        logger.info(f"Starting Vertex AI Job for {job_id}")
+        resolved_model_type = normalize_model_type(model_type)
+        logger.info(
+            f"Starting Vertex AI Job for {job_id} (model_type={resolved_model_type})"
+        )
 
         # 1. Download Data
         storage_client = storage.Client()
@@ -132,8 +140,81 @@ def train_and_predict(
                 f"(N={max_unique_values})."
             )
 
+        if resolved_model_type == MODEL_TYPE_CHOW_LIU:
+            from chow_liu_rank import CLTree, per_column_contributions_from_nll
+
+            logger.info("Fitting Chow-Liu tree...")
+            cl_model = CLTree(alpha=1.0).fit(
+                process_df, mi_subsample=10000, random_state=42
+            )
+            per_col_nll = cl_model.per_column_nll(process_df)
+            anomaly_scores = per_col_nll.mean(axis=1)
+            df["reconstruction_error"] = anomaly_scores
+
+            top_outliers = (
+                df.sort_values(by="reconstruction_error", ascending=False)
+                .head(100)
+                .copy()
+            )
+            top_positions = df.index.get_indexer(top_outliers.index)
+
+            # Format "Original -> Predicted" using conditional MAP categories
+            try:
+                predicted_df = cl_model.predict_most_likely(
+                    process_df.loc[top_outliers.index]
+                )
+                for col in predicted_df.columns:
+                    if col in top_outliers.columns and col != "reconstruction_error":
+                        original_vals = (
+                            top_outliers[col].fillna("missing").astype(str)
+                        )
+                        predicted_vals = (
+                            predicted_df[col].fillna("missing").astype(str)
+                        )
+                        top_outliers[col] = [
+                            f"{orig} -> {pred}" if orig != pred else orig
+                            for orig, pred in zip(original_vals, predicted_vals)
+                        ]
+            except Exception as decode_err:
+                logger.error(f"Failed to format Chow-Liu predictions: {decode_err}")
+
+            top_outliers = top_outliers.replace([np.inf, -np.inf], 0).fillna("missing")
+            max_contributions = 10
+            outliers_data = []
+            for pos, (_, row) in zip(top_positions, top_outliers.iterrows()):
+                contribs = per_column_contributions_from_nll(
+                    per_col_nll[pos], cl_model.columns
+                )[:max_contributions]
+                row_dict = row.to_dict()
+                raw_score = float(anomaly_scores[pos])
+                score = raw_score if np.isfinite(raw_score) else 0.0
+                row_dict["reconstruction_error"] = score
+                outliers_data.append({
+                    "data": row_dict,
+                    "reconstruction_error": score,
+                    "contributions": [
+                        {"column": col, "percentage": float(pct)}
+                        for col, pct in contribs
+                    ],
+                })
+
+            db.collection('jobs').document(job_id).set({
+                "status": "complete",
+                "stats": stats,
+                "outliers": outliers_data,
+                "processedAt": firestore.SERVER_TIMESTAMP,
+                "modelType": MODEL_TYPE_CHOW_LIU,
+            }, merge=True)
+
+            logger.info("Job Complete (chow_liu)")
+            return
+
         # 3. Vectorization & model setup (split before fitting to prevent data leakage)
         from sklearn.model_selection import train_test_split as _tts
+        from evaluate.outliers import compute_reconstruction_error
+        from features.transform import Table2Vector
+        from model.autoencoder import AutoencoderModel
+
         model_variable_types = {col: "categorical" for col in process_df.columns}
         vectorizer = Table2Vector(model_variable_types)
 
@@ -250,6 +331,7 @@ def train_and_predict(
             "stats": stats,
             "outliers": top_outliers.to_dict(orient="records"),
             "processedAt": firestore.SERVER_TIMESTAMP,
+            "modelType": resolved_model_type,
             "modelPreset": resolved_preset,
             "modelPresetRequested": requested_preset,
         }, merge=True)
@@ -291,6 +373,14 @@ if __name__ == "__main__":
         default=None,
         dest='model_preset',
     )
+    # Detection method id forwarded from worker.process_upload_vertex
+    # ('autoencoder' or 'chow_liu'). Absent defaults to 'autoencoder'.
+    parser.add_argument(
+        '--model-type',
+        type=str,
+        default=None,
+        dest='model_type',
+    )
     args = parser.parse_args()
 
     train_and_predict(
@@ -299,4 +389,5 @@ if __name__ == "__main__":
         args.file_path,
         max_unique_values=args.max_unique_values,
         model_preset=args.model_preset,
+        model_type=args.model_type,
     )

@@ -21,12 +21,17 @@ interface JobStatus {
   error?: string;
   errorCode?: string;
   errorType?: string;
+  // Detection method chosen by the user ('autoencoder' or 'chow_liu').
+  modelType?: string;
   // TASKS.md 3.2: model preset metadata persisted by the worker.
   // `modelPreset` is the resolved preset id (small/medium/large) the
   // worker actually used; `modelPresetRequested` is what the user /
   // dropdown asked for (small/medium/large/auto).
   modelPreset?: string;
   modelPresetRequested?: string;
+  outliers?: any[];
+  stats?: any;
+  filesExpired?: boolean;
 }
 
 /** Custom error that preserves the HTTP status code. */

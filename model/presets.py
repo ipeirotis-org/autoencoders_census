@@ -50,6 +50,45 @@ from __future__ import annotations
 
 from typing import Any
 
+MODEL_TYPE_AUTOENCODER = "autoencoder"
+MODEL_TYPE_CHOW_LIU = "chow_liu"
+
+#: Tuple of every detection method id the API will accept via the
+#: ``modelType`` field. Keep in sync with ``VALID_MODEL_TYPES`` in
+#: ``frontend/server/middleware/validation.ts`` and ``MODEL_METHODS`` in
+#: ``frontend/server/utils/modelPresets.ts``.
+VALID_MODEL_TYPES: tuple[str, ...] = (
+    MODEL_TYPE_AUTOENCODER,
+    MODEL_TYPE_CHOW_LIU,
+)
+
+#: Default detection method when the caller omits ``modelType`` (preserves
+#: backward compatibility with legacy API clients and rolling deploys).
+DEFAULT_MODEL_TYPE = MODEL_TYPE_AUTOENCODER
+
+#: Frontend-facing detection method metadata served alongside ``PRESET_INFO``
+#: by ``GET /api/jobs/presets``.
+MODEL_TYPE_INFO: list[dict[str, str]] = [
+    {
+        "id": MODEL_TYPE_CHOW_LIU,
+        "label": "Chow-Liu Tree",
+        "description": (
+            "Closed-form mutual-information tree. Deterministic, zero "
+            "hyperparameters, and finishes in under a second. Recommended "
+            "for most surveys."
+        ),
+    },
+    {
+        "id": MODEL_TYPE_AUTOENCODER,
+        "label": "Autoencoder (Neural)",
+        "description": (
+            "Neural autoencoder with percentile-trimmed categorical "
+            "cross-entropy. Captures higher-order multivariate interactions; "
+            "choose a model size preset below."
+        ),
+    },
+]
+
 PRESET_AUTO = "auto"
 PRESET_SMALL = "small"
 PRESET_MEDIUM = "medium"
@@ -213,6 +252,27 @@ AUTO_SELECT_MIN_ROWS_FOR_MEDIUM = 200
 AUTO_SELECT_MIN_INPUT_DIM_FOR_MEDIUM = 30
 AUTO_SELECT_MIN_INPUT_DIM_FOR_LARGE = 150
 AUTO_SELECT_MIN_ROWS_FOR_LARGE = 1000
+
+
+def list_model_types() -> list[dict[str, str]]:
+    """Return a fresh deep copy of :data:`MODEL_TYPE_INFO`."""
+    return [dict(entry) for entry in MODEL_TYPE_INFO]
+
+
+def normalize_model_type(name: Any) -> str:
+    """Coerce an arbitrary detection method name to a valid id.
+
+    Accepts strings (case-insensitive, stripped of surrounding whitespace),
+    ``None``, or any other type. Unknown or empty values fall back to
+    :data:`DEFAULT_MODEL_TYPE` (``autoencoder``) so legacy callers and
+    unrecognized inputs never crash the worker.
+    """
+    if name is None:
+        return DEFAULT_MODEL_TYPE
+    candidate = str(name).strip().lower()
+    if candidate in VALID_MODEL_TYPES:
+        return candidate
+    return DEFAULT_MODEL_TYPE
 
 
 def list_presets() -> list[dict[str, str]]:

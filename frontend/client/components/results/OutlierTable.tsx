@@ -22,6 +22,7 @@ interface Outlier {
 
 interface OutlierTableProps {
   outliers: Outlier[];
+  modelType?: string;
 }
 
 /**
@@ -31,12 +32,12 @@ interface OutlierTableProps {
  * - Expandable row pattern similar to GitHub PR file list
  * - Chevron icon indicates expand/collapse state
  * - ContributionScores component renders in expanded panel
- * - Reconstruction error displayed with 3 decimal places
+ * - Score displayed with 3 decimal places
  * - All outliers displayed (no pagination for v1)
  *
  * Collapsible component provides automatic transition animation.
  */
-export function OutlierTable({ outliers }: OutlierTableProps) {
+export function OutlierTable({ outliers, modelType }: OutlierTableProps) {
   return (
     <div className="border rounded-lg">
       <div className="bg-muted px-4 py-2 font-semibold text-sm">
@@ -44,7 +45,12 @@ export function OutlierTable({ outliers }: OutlierTableProps) {
       </div>
       <div className="divide-y">
         {outliers.map((outlier, index) => (
-          <OutlierRow key={index} rowIndex={index} outlier={outlier} />
+          <OutlierRow
+            key={index}
+            rowIndex={index}
+            outlier={outlier}
+            modelType={modelType}
+          />
         ))}
       </div>
     </div>
@@ -56,13 +62,25 @@ export function OutlierTable({ outliers }: OutlierTableProps) {
  *
  * Manages its own expand/collapse state.
  */
-function OutlierRow({ outlier, rowIndex }: { outlier: Outlier; rowIndex: number }) {
+function OutlierRow({
+  outlier,
+  rowIndex,
+  modelType,
+}: {
+  outlier: Outlier;
+  rowIndex: number;
+  modelType?: string;
+}) {
   const [isOpen, setIsOpen] = useState(false);
 
   const score =
     typeof outlier.reconstruction_error === "number"
       ? outlier.reconstruction_error.toFixed(3)
       : "—";
+  const scoreLabel =
+    modelType === "chow_liu"
+      ? "Anomaly score (neg. log-likelihood)"
+      : "Reconstruction error";
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -80,7 +98,7 @@ function OutlierRow({ outlier, rowIndex }: { outlier: Outlier; rowIndex: number 
           <div className="flex-1 flex items-center justify-between">
             <span className="text-sm font-medium">Row {rowIndex + 1}</span>
             <span className="text-sm text-muted-foreground">
-              Reconstruction error: {score}
+              {scoreLabel}: {score}
             </span>
           </div>
         </div>

@@ -40,6 +40,8 @@ export interface JobStatus {
   error?: string;
   errorCode?: string;
   errorType?: string;
+  // Detection method chosen by the user ('autoencoder' or 'chow_liu').
+  modelType?: string;
   // TASKS.md 3.2: model preset metadata. `modelPreset` is the resolved
   // preset id (small/medium/large) the worker actually used;
   // `modelPresetRequested` is what the user / dropdown asked for
@@ -59,6 +61,21 @@ export interface ModelPresetInfo {
   id: string;
   label: string;
   description: string;
+}
+
+/**
+ * Detection method metadata served alongside presets by `GET /api/jobs/presets`.
+ * Mirrors `model.presets.list_model_types()` in Python.
+ */
+export interface ModelMethodInfo {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface ModelOptionsResponse {
+  presets: ModelPresetInfo[];
+  methods: ModelMethodInfo[];
 }
 
 /**
@@ -119,9 +136,17 @@ async function uploadToGcs(url: string, file: File) {
 }
 
 // 3. Notify Backend to Start Worker
-async function startJob(jobId: string, gcsFileName: string, modelPreset?: string) {
+async function startJob(
+  jobId: string,
+  gcsFileName: string,
+  modelPreset?: string,
+  modelType?: string
+) {
   const body: Record<string, string> = { jobId, gcsFileName };
-  if (modelPreset) {
+  if (modelType) {
+    body.modelType = modelType;
+  }
+  if (modelPreset && modelType !== "chow_liu") {
     body.modelPreset = modelPreset;
   }
   const res = await fetch(`${API_BASE}/api/jobs/start-job`, {
@@ -137,11 +162,14 @@ async function startJob(jobId: string, gcsFileName: string, modelPreset?: string
 
 // Main Upload Function
 //
-// `modelPreset` is the optional preset id chosen via the dropdown
-// (TASKS.md 3.2). When omitted (legacy callers, no dropdown wired up
-// yet), the server defaults it to 'auto' on its end so we never
-// publish an undefined value to Pub/Sub.
-export async function uploadCsv(file: File, modelPreset?: string): Promise<UploadResponse> {
+// `modelPreset` is the optional autoencoder preset id chosen via the dropdown
+// (TASKS.md 3.2); `modelType` selects the detection method ('chow_liu' or
+// 'autoencoder'). When omitted, the server defaults to 'autoencoder' / 'auto'.
+export async function uploadCsv(
+  file: File,
+  modelPreset?: string,
+  modelType?: string
+): Promise<UploadResponse> {
   // A. Get URL - pass file.type so the server signs for that exact
   //    Content-Type (or omits the constraint if file.type is empty).
   const { url, jobId, gcsFileName } = await getUploadUrl(file.name, file.type);
@@ -150,33 +178,41 @@ export async function uploadCsv(file: File, modelPreset?: string): Promise<Uploa
   await uploadToGcs(url, file);
 
   // C. Start Job
-  await startJob(jobId, gcsFileName, modelPreset);
+  await startJob(jobId, gcsFileName, modelPreset, modelType);
 
   return { jobId };
 }
 
 /**
- * Fetch the available model presets from the API. The result populates
- * the upload-time preset dropdown. Returns an empty array on failure
- * so the caller can fall back to a sensible default ('auto') without
- * blocking the upload UI.
+ * Fetch available detection methods and autoencoder presets from the API.
+ * Returns empty arrays on failure so the UI can fall back cleanly without
+ * blocking the upload workflow.
  */
-export async function fetchModelPresets(): Promise<ModelPresetInfo[]> {
+export async function fetchModelOptions(): Promise<ModelOptionsResponse> {
   try {
     const res = await fetch(`${API_BASE}/api/jobs/presets`, {
       credentials: "include",
     });
     if (!res.ok) {
-      return [];
+      return { presets: [], methods: [] };
     }
     const data = await res.json();
-    if (Array.isArray(data?.presets)) {
-      return data.presets as ModelPresetInfo[];
-    }
-    return [];
+    return {
+      presets: Array.isArray(data?.presets) ? (data.presets as ModelPresetInfo[]) : [],
+      methods: Array.isArray(data?.methods) ? (data.methods as ModelMethodInfo[]) : [],
+    };
   } catch {
-    return [];
+    return { presets: [], methods: [] };
   }
+}
+
+/**
+ * Fetch the available model presets from the API. Kept for backwards
+ * compatibility with callers that only need presets.
+ */
+export async function fetchModelPresets(): Promise<ModelPresetInfo[]> {
+  const { presets } = await fetchModelOptions();
+  return presets;
 }
 
 // Poll Status

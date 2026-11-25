@@ -142,11 +142,20 @@ export const validateUploadUrl: (ValidationChain | typeof handleValidationErrors
 export const VALID_MODEL_PRESETS = ['auto', 'small', 'medium', 'large'] as const;
 
 /**
+ * Allowed detection method ids. Must stay in sync with `VALID_MODEL_TYPES`
+ * in `model/presets.py` and `MODEL_METHODS` in
+ * `frontend/server/utils/modelMethods.ts`.
+ */
+export const VALID_MODEL_TYPES = ['autoencoder', 'chow_liu'] as const;
+
+/**
  * Validation chain for start job request
  * - Job ID must be valid UUID
  * - GCS filename required
  * - modelPreset is optional and must be one of VALID_MODEL_PRESETS
  *   when present (TASKS.md 3.2)
+ * - modelType is optional and must be one of VALID_MODEL_TYPES
+ *   when present
  */
 export const validateStartJob: (ValidationChain | typeof handleValidationErrors)[] = [
   body('jobId')
@@ -163,6 +172,15 @@ export const validateStartJob: (ValidationChain | typeof handleValidationErrors)
     .isIn(VALID_MODEL_PRESETS as unknown as string[])
     .withMessage(
       `Model preset must be one of: ${VALID_MODEL_PRESETS.join(', ')}`
+    ),
+  body('modelType')
+    .optional({ nullable: true })
+    .isString()
+    .withMessage('Model type must be a string')
+    .bail()
+    .isIn(VALID_MODEL_TYPES as unknown as string[])
+    .withMessage(
+      `Model type must be one of: ${VALID_MODEL_TYPES.join(', ')}`
     ),
   handleValidationErrors,
 ];
