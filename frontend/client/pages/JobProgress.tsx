@@ -154,31 +154,41 @@ export default function JobProgress() {
               // objects; toDate handles that and falls back to "now" so the
               // elapsed-time display doesn't render "Invalid Date".
               startTime={toDate(job.createdAt) ?? new Date()}
-              estimatedDuration={15 * 60 * 1000} // 15 minutes
+              estimatedDuration={
+                job.modelType === 'chow_liu' ? 10 * 1000 : 15 * 60 * 1000
+              }
               fileName={job.fileName || 'Unknown'}
               fileSize={job.fileSize || 0}
             />
 
-            {/* TASKS.md 3.2: surface the chosen model preset.
-                modelPreset is the worker-resolved preset (small/medium/large);
-                modelPresetRequested is what the dropdown sent. We show
-                "(auto)" alongside when the user picked auto so it's clear
-                where the chosen preset came from. */}
-            {(job.modelPreset || job.modelPresetRequested) && (
-              <div className="text-xs text-gray-600">
-                <span className="font-semibold">Model preset:</span>{' '}
-                <span className="font-mono">
-                  {job.modelPreset || job.modelPresetRequested}
+            {/* Surface the detection method (Chow-Liu vs Autoencoder) and,
+                for neural autoencoder jobs, the chosen / resolved preset. */}
+            <div className="text-xs text-gray-600 space-y-1">
+              <div>
+                <span className="font-semibold">Detection method:</span>{' '}
+                <span>
+                  {job.modelType === 'chow_liu'
+                    ? 'Chow-Liu Tree (closed-form)'
+                    : 'Autoencoder (Neural)'}
                 </span>
-                {job.modelPreset &&
-                  job.modelPresetRequested &&
-                  job.modelPresetRequested !== job.modelPreset && (
-                    <span className="ml-1 text-gray-500">
-                      ({job.modelPresetRequested})
-                    </span>
-                  )}
               </div>
-            )}
+              {job.modelType !== 'chow_liu' &&
+                (job.modelPreset || job.modelPresetRequested) && (
+                  <div>
+                    <span className="font-semibold">Model preset:</span>{' '}
+                    <span className="font-mono">
+                      {job.modelPreset || job.modelPresetRequested}
+                    </span>
+                    {job.modelPreset &&
+                      job.modelPresetRequested &&
+                      job.modelPresetRequested !== job.modelPreset && (
+                        <span className="ml-1 text-gray-500">
+                          ({job.modelPresetRequested})
+                        </span>
+                      )}
+                  </div>
+                )}
+            </div>
 
             {isActive && (
               <AlertDialog>
@@ -272,7 +282,7 @@ export default function JobProgress() {
 
             {job.status === 'complete' && job.outliers && job.outliers.length > 0 && (
               <div className="mt-6">
-                <OutlierTable outliers={job.outliers} />
+                <OutlierTable outliers={job.outliers} modelType={job.modelType} />
               </div>
             )}
 

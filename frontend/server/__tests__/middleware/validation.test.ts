@@ -373,5 +373,65 @@ describe('Jobs validation middleware', () => {
         ])
       );
     });
+
+    it.each(['autoencoder', 'chow_liu'])(
+      'should accept modelType=%s',
+      async (modelType) => {
+        const validUuid = '123e4567-e89b-12d3-a456-426614174000';
+        const response = await request(app)
+          .post('/test-start-job')
+          .send({
+            jobId: validUuid,
+            gcsFileName: 'uploads/user123/file.csv',
+            modelType,
+          });
+
+        expect(response.status).toBe(200);
+        expect(response.body.success).toBe(true);
+      }
+    );
+
+    it('should reject unknown modelType value', async () => {
+      const validUuid = '123e4567-e89b-12d3-a456-426614174000';
+      const response = await request(app)
+        .post('/test-start-job')
+        .send({
+          jobId: validUuid,
+          gcsFileName: 'uploads/user123/file.csv',
+          modelType: 'random_forest',
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Validation failed');
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            field: 'modelType',
+            message: expect.stringContaining('must be one of'),
+          }),
+        ])
+      );
+    });
+
+    it('should reject non-string modelType', async () => {
+      const validUuid = '123e4567-e89b-12d3-a456-426614174000';
+      const response = await request(app)
+        .post('/test-start-job')
+        .send({
+          jobId: validUuid,
+          gcsFileName: 'uploads/user123/file.csv',
+          modelType: 123,
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Validation failed');
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            field: 'modelType',
+          }),
+        ])
+      );
+    });
   });
 });

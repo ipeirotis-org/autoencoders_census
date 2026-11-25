@@ -13,9 +13,10 @@ import { parseCSVFile, type CSVParseResult } from "@/utils/csv-parser";
 import {
   uploadCsv,
   checkJobStatus,
-  fetchModelPresets,
+  fetchModelOptions,
   ApiError,
   type JobStatus,
+  type ModelMethodInfo,
   type ModelPresetInfo,
 } from "@/utils/api";
 import { resolveJobError } from "@/utils/jobErrors";
@@ -24,6 +25,23 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { cn } from "@/lib/utils";
 import { PreviewErrorBoundary } from "@/components/error-boundaries/PreviewErrorBoundary";
 import { ResultsErrorBoundary } from "@/components/error-boundaries/ResultsErrorBoundary";
+
+// Fallback detection methods used when /api/jobs/presets fails (e.g. offline
+// dev). Mirrors `frontend/server/utils/modelMethods.ts`.
+const FALLBACK_METHODS: ModelMethodInfo[] = [
+  {
+    id: "chow_liu",
+    label: "Chow-Liu Tree",
+    description:
+      "Closed-form mutual-information tree. Deterministic, zero hyperparameters, and finishes in under a second. Recommended for most surveys.",
+  },
+  {
+    id: "autoencoder",
+    label: "Autoencoder (Neural)",
+    description:
+      "Neural autoencoder with percentile-trimmed categorical cross-entropy. Captures higher-order multivariate interactions; choose a model size preset below.",
+  },
+];
 
 // Fallback preset list used when the /api/jobs/presets fetch fails (e.g.
 // offline dev). Mirrors the canonical list in
@@ -44,25 +62,28 @@ export default function Index() {
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<any>(null);
   const [loggingOut, setLoggingOut] = useState(false);
-  // TASKS.md 3.2: model preset dropdown state. `presets` is the list
-  // fetched from /api/jobs/presets (with FALLBACK_PRESETS as a backup);
-  // `selectedPreset` is the id passed to uploadCsv.
+  // Detection method selector ('chow_liu' or 'autoencoder') plus autoencoder
+  // size preset dropdown (TASKS.md 3.2). Both lists hydrate from
+  // /api/jobs/presets with local fallbacks.
+  const [methods, setMethods] = useState<ModelMethodInfo[]>(FALLBACK_METHODS);
+  const [selectedMethod, setSelectedMethod] = useState<string>("chow_liu");
   const [presets, setPresets] = useState<ModelPresetInfo[]>(FALLBACK_PRESETS);
   const [selectedPreset, setSelectedPreset] = useState<string>("auto");
   const { toast } = useToast();
   const navigate = useNavigate();
   const { user, setUser } = useCurrentUser();
 
-  // Fetch model presets once on mount. We don't block rendering on this:
-  // FALLBACK_PRESETS already gives the dropdown four sensible options,
-  // so a slow / failed network round-trip just means the user can't see
-  // the freshly-edited descriptions until next visit.
+  // Fetch detection methods and model presets once on mount without blocking
+  // rendering (FALLBACK_METHODS / FALLBACK_PRESETS render immediately).
   useEffect(() => {
     let cancelled = false;
-    fetchModelPresets().then((fetched) => {
+    fetchModelOptions().then(({ presets: fetchedPresets, methods: fetchedMethods }) => {
       if (cancelled) return;
-      if (fetched.length > 0) {
-        setPresets(fetched);
+      if (fetchedPresets.length > 0) {
+        setPresets(fetchedPresets);
+      }
+      if (fetchedMethods.length > 0) {
+        setMethods(fetchedMethods);
       }
     });
     return () => {
@@ -143,8 +164,9 @@ export default function Index() {
     setStatus("processing"); // Show spinner
 
     try {
-      // TASKS.md 3.2: forward the user's preset choice to the worker.
-      const response = await uploadCsv(file, selectedPreset);
+      const presetToSend =
+        selectedMethod === "autoencoder" ? selectedPreset : undefined;
+      const response = await uploadCsv(file, presetToSend, selectedMethod);
       // Navigate to the dedicated progress page so the user gets the
       // full monitoring/cancel/export UI introduced in Phase 4.
       navigate(`/job/${response.jobId}`);
@@ -157,7 +179,7 @@ export default function Index() {
       setError(err.message);
       setStatus("error");
     }
-  }, [file, selectedPreset, navigate, setUser]);
+  }, [file, selectedMethod, selectedPreset, navigate, setUser]);
 
   const handleReset = () => {
     setFile(null);
@@ -225,34 +247,94 @@ export default function Index() {
                   <PreviewTable rows={preview.rows} headers={preview.headers} totalRows={preview.totalRows} />
                 </PreviewErrorBoundary>
 
-                {/* TASKS.md 3.2: Model preset picker. Defaults to "auto"
-                    which lets the worker pick a preset based on the
-                    cleaned dataset shape. */}
+                {/* Detection Method Picker: Chow-Liu Tree vs Neural Autoencoder */}
                 <div className="mt-6">
-                  <label
-                    htmlFor="model-preset"
-                    className="block text-sm font-semibold mb-1 text-gray-800"
+                  <span
+                    id="detection-method-label"
+                    className="block text-sm font-semibold mb-2 text-gray-800"
                   >
-                    Model preset
-                  </label>
-                  <select
-                    id="model-preset"
-                    value={selectedPreset}
-                    onChange={(e) => setSelectedPreset(e.target.value)}
-                    disabled={isProcessing}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    Detection method
+                  </span>
+                  <div
+                    role="radiogroup"
+                    aria-labelledby="detection-method-label"
+                    className="grid grid-cols-1 sm:grid-cols-2 gap-3"
                   >
-                    {presets.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.label}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="mt-1 text-xs text-gray-500">
-                    {presets.find((p) => p.id === selectedPreset)?.description ||
-                      "Choose a model size for the autoencoder."}
-                  </p>
+                    {methods.map((method) => {
+                      const isSelected = selectedMethod === method.id;
+                      const badge =
+                        method.id === "chow_liu"
+                          ? "Fast · Deterministic"
+                          : "Deep Learning";
+                      return (
+                        <button
+                          key={method.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={isSelected}
+                          disabled={isProcessing}
+                          onClick={() => setSelectedMethod(method.id)}
+                          className={cn(
+                            "text-left rounded-lg border p-3.5 transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60 disabled:cursor-not-allowed",
+                            isSelected
+                              ? "border-blue-600 bg-blue-50/60 ring-1 ring-blue-600"
+                              : "border-gray-200 bg-white hover:border-gray-300"
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-gray-900">
+                              {method.label}
+                            </span>
+                            <span
+                              className={cn(
+                                "text-[11px] font-medium px-2 py-0.5 rounded-full",
+                                isSelected
+                                  ? "bg-blue-100 text-blue-800"
+                                  : "bg-gray-100 text-gray-600"
+                              )}
+                            >
+                              {badge}
+                            </span>
+                          </div>
+                          <p className="mt-1.5 text-xs text-gray-600 leading-relaxed">
+                            {method.description}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
+
+                {/* TASKS.md 3.2: Autoencoder size preset picker — shown only
+                    when the neural autoencoder is selected (Chow-Liu is
+                    closed-form with zero tuning hyperparameters). */}
+                {selectedMethod === "autoencoder" && (
+                  <div className="mt-4">
+                    <label
+                      htmlFor="model-preset"
+                      className="block text-sm font-semibold mb-1 text-gray-800"
+                    >
+                      Autoencoder model preset
+                    </label>
+                    <select
+                      id="model-preset"
+                      value={selectedPreset}
+                      onChange={(e) => setSelectedPreset(e.target.value)}
+                      disabled={isProcessing}
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    >
+                      {presets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {presets.find((p) => p.id === selectedPreset)?.description ||
+                        "Choose a model size for the autoencoder."}
+                    </p>
+                  </div>
+                )}
 
                 <div className="mt-4 flex gap-4">
                   <Button onClick={handleUpload} disabled={isProcessing} size="lg" className="flex-1">

@@ -37,18 +37,25 @@ from model.presets import (
     AUTO_SELECT_MIN_INPUT_DIM_FOR_MEDIUM,
     AUTO_SELECT_MIN_ROWS_FOR_LARGE,
     AUTO_SELECT_MIN_ROWS_FOR_MEDIUM,
+    DEFAULT_MODEL_TYPE,
     DEFAULT_PRESET,
+    MODEL_TYPE_AUTOENCODER,
+    MODEL_TYPE_CHOW_LIU,
+    MODEL_TYPE_INFO,
     PRESET_AUTO,
     PRESET_DEFINITIONS,
     PRESET_INFO,
     PRESET_LARGE,
     PRESET_MEDIUM,
     PRESET_SMALL,
+    VALID_MODEL_TYPES,
     VALID_PRESETS,
     auto_select_preset,
     build_model_config,
     get_preset_config,
+    list_model_types,
     list_presets,
+    normalize_model_type,
     normalize_preset_name,
 )
 
@@ -505,3 +512,101 @@ class TestFrontendPresetMirror:
             f"frontend validation.ts allowlist {ids} drifted from Python "
             f"VALID_PRESETS {set(VALID_PRESETS)}"
         )
+
+    def test_typescript_model_method_ids_match_python(self):
+        ts_path = (
+            Path(__file__).parent.parent
+            / "frontend"
+            / "server"
+            / "utils"
+            / "modelMethods.ts"
+        )
+        if not ts_path.exists():
+            pytest.skip(f"frontend method list missing at {ts_path}")
+        text = ts_path.read_text(encoding="utf-8")
+        ids = set(re.findall(r"id:\s*'([^']+)'", text))
+        python_ids = {entry["id"] for entry in MODEL_TYPE_INFO}
+        assert ids == python_ids, (
+            f"frontend modelMethods.ts ids {ids} drifted from Python "
+            f"MODEL_TYPE_INFO {python_ids}"
+        )
+
+    def test_typescript_model_type_validation_allowlist_matches_python(self):
+        ts_path = (
+            Path(__file__).parent.parent
+            / "frontend"
+            / "server"
+            / "middleware"
+            / "validation.ts"
+        )
+        if not ts_path.exists():
+            pytest.skip(f"validation middleware missing at {ts_path}")
+        text = ts_path.read_text(encoding="utf-8")
+        match = re.search(
+            r"VALID_MODEL_TYPES\s*=\s*\[([^\]]+)\]",
+            text,
+        )
+        assert match, "Could not find VALID_MODEL_TYPES in validation.ts"
+        ids = set(re.findall(r"'([^']+)'", match.group(1)))
+        assert ids == set(VALID_MODEL_TYPES), (
+            f"frontend validation.ts VALID_MODEL_TYPES {ids} drifted from Python "
+            f"VALID_MODEL_TYPES {set(VALID_MODEL_TYPES)}"
+        )
+
+
+class TestModelTypeCatalogAndForwarding:
+    """Tests for detection method catalog, normalization, Pub/Sub schema, and Vertex args."""
+
+    def test_catalog_and_default(self):
+        assert DEFAULT_MODEL_TYPE == MODEL_TYPE_AUTOENCODER
+        assert set(VALID_MODEL_TYPES) == {MODEL_TYPE_AUTOENCODER, MODEL_TYPE_CHOW_LIU}
+        assert {entry["id"] for entry in MODEL_TYPE_INFO} == set(VALID_MODEL_TYPES)
+        listed = list_model_types()
+        assert listed == MODEL_TYPE_INFO
+        listed[0]["label"] = "MUTATED"
+        assert MODEL_TYPE_INFO[0]["label"] != "MUTATED"
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (None, MODEL_TYPE_AUTOENCODER),
+            ("", MODEL_TYPE_AUTOENCODER),
+            ("autoencoder", MODEL_TYPE_AUTOENCODER),
+            ("  AUTOENCODER ", MODEL_TYPE_AUTOENCODER),
+            ("chow_liu", MODEL_TYPE_CHOW_LIU),
+            ("  CHOW_LIU\n", MODEL_TYPE_CHOW_LIU),
+            ("unknown_method", MODEL_TYPE_AUTOENCODER),
+            (123, MODEL_TYPE_AUTOENCODER),
+        ],
+    )
+    def test_normalize_model_type(self, raw, expected):
+        assert normalize_model_type(raw) == expected
+
+    def test_pubsub_message_accepts_optional_model_type(self):
+        from worker import validate_message
+
+        legacy = validate_message({"jobId": "j1", "bucket": "b", "file": "f.csv"})
+        assert legacy.modelType is None
+
+        cl_msg = validate_message({
+            "jobId": "j2",
+            "bucket": "b",
+            "file": "f.csv",
+            "modelType": "chow_liu",
+        })
+        assert cl_msg.modelType == "chow_liu"
+
+    def test_vertex_args_rolling_deploy_compat_for_model_type(self):
+        from worker import _build_vertex_training_args
+
+        # Default / None / 'autoencoder' must omit --model-type
+        for mt in (None, "autoencoder", "AUTOENCODER", "unknown"):
+            args = _build_vertex_training_args("j1", "b", "f.csv", model_type=mt)
+            assert all(not a.startswith("--model-type") for a in args)
+
+        # 'chow_liu' emits --model-type=chow_liu and suppresses --model-preset
+        args_cl = _build_vertex_training_args(
+            "j1", "b", "f.csv", model_preset="large", model_type="chow_liu"
+        )
+        assert "--model-type=chow_liu" in args_cl
+        assert all(not a.startswith("--model-preset") for a in args_cl)

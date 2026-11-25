@@ -45,7 +45,9 @@ from pydantic import BaseModel, Field, ValidationError
 from dataset.loader import DataLoader, DEFAULT_MAX_UNIQUE_VALUES
 from features.transform import Table2Vector
 from model.presets import (
+    MODEL_TYPE_CHOW_LIU,
     build_model_config,
+    normalize_model_type,
     normalize_preset_name,
 )
 
@@ -183,6 +185,7 @@ def _build_vertex_training_args(
     file_path,
     max_unique_values=None,
     model_preset=None,
+    model_type=None,
 ):
     """Build the CLI arg list for the Vertex training container.
 
@@ -190,14 +193,15 @@ def _build_vertex_training_args(
     dispatcher process's environment variables to the training
     container, so any ``MAX_UNIQUE_VALUES`` override set on the
     worker would be silently ignored by ``train/task.py``. We
-    therefore propagate the Rule-of-N threshold (and TASKS.md 3.2's
-    model preset id) explicitly via CLI args.
+    therefore propagate the Rule-of-N threshold, TASKS.md 3.2's
+    model preset id, and the detection method (``--model-type``)
+    explicitly via CLI args.
 
-    Optional args (``--max-unique-values`` and ``--model-preset``)
-    are only appended when a non-``None`` value is supplied so that
-    a Vertex container running an older ``train/task.py`` (which
-    doesn't yet recognise the flag) still accepts the arg list from
-    the current dispatcher during a rolling deploy.
+    Optional args (``--max-unique-values``, ``--model-preset``, and
+    ``--model-type``) are only appended when a non-default value is
+    supplied so that a Vertex container running an older
+    ``train/task.py`` still accepts the arg list from the current
+    dispatcher during a rolling deploy.
 
     Args:
         job_id: Firestore job document ID.
@@ -207,7 +211,12 @@ def _build_vertex_training_args(
             ``None`` to leave it out entirely (so the container
             falls back to its own default).
         model_preset: Optional preset id from :mod:`model.presets`.
-            ``None`` omits the flag entirely.
+            ``None``, ``'auto'``, or any value when ``model_type`` is
+            ``'chow_liu'`` omits the flag entirely.
+        model_type: Optional detection method id from
+            :mod:`model.presets` (``'autoencoder'`` / ``'chow_liu'``).
+            ``None`` and ``'autoencoder'`` omit the flag for
+            rolling-deploy compatibility.
 
     Returns:
         list[str]: the ``args`` parameter to pass to ``job.run()``.
@@ -219,19 +228,21 @@ def _build_vertex_training_args(
     ]
     if max_unique_values is not None:
         args.append(f"--max-unique-values={int(max_unique_values)}")
+
+    resolved_type = (
+        normalize_model_type(model_type) if model_type is not None else None
+    )
+    if resolved_type is not None and resolved_type != "autoencoder":
+        args.append(f"--model-type={resolved_type}")
+
     # Codex P1 r#50: treat 'auto' as equivalent to None and omit the
-    # flag. Semantically the trainer resolves both identically via
-    # `build_model_config` → `normalize_preset_name` → `auto_select_preset`,
-    # so sending `--model-preset=auto` vs omitting the flag produces
-    # the same resolved config on a new trainer — but only the
-    # "omit" variant is safe to send to an OLD trainer image (pre-
-    # `--model-preset` support in train/task.py) that would otherwise
-    # exit on the unrecognized CLI arg during a rolling deploy. This
-    # is defense-in-depth on top of the jobs.ts fix that stops
-    # emitting 'auto' in the Pub/Sub message: a stale worker image
-    # paired with a newer API server would otherwise still send
-    # --model-preset=auto here.
-    if model_preset is not None and str(model_preset).strip().lower() != "auto":
+    # flag. Also omit --model-preset for Chow-Liu (closed-form, no size
+    # preset).
+    if (
+        resolved_type != MODEL_TYPE_CHOW_LIU
+        and model_preset is not None
+        and str(model_preset).strip().lower() != "auto"
+    ):
         args.append(f"--model-preset={model_preset}")
     return args
 
@@ -239,14 +250,11 @@ def _build_vertex_training_args(
 class PubSubMessage(BaseModel):
     """Pydantic model for validating Pub/Sub message payload.
 
-    ``modelPreset`` (TASKS.md 3.2) is the optional preset id chosen by
-    the user in the upload UI. The field is intentionally lenient: any
-    unknown / missing value is normalized to the ``auto`` sentinel by
-    :func:`model.presets.normalize_preset_name` later in the pipeline,
-    so a stale frontend or a legacy /start-job request that omits the
-    field still works. Validation here is also lenient — we accept any
-    string and let the normalizer (which logs the resolved value)
-    enforce the allowlist.
+    ``modelPreset`` (TASKS.md 3.2) and ``modelType`` are optional fields
+    chosen by the user in the upload UI. Both fields are intentionally
+    lenient: any unknown / missing value is normalized to its default
+    (``auto`` / ``autoencoder``) later in the pipeline, so a stale
+    frontend or legacy /start-job request still works.
     """
     jobId: str = Field(..., min_length=1, description="Firestore job document ID")
     bucket: str = Field(..., min_length=1, description="GCS bucket name")
@@ -256,6 +264,13 @@ class PubSubMessage(BaseModel):
         description=(
             "Optional model preset id from model.presets (auto/small/"
             "medium/large). Unknown values fall back to 'auto'."
+        ),
+    )
+    modelType: str | None = Field(
+        default=None,
+        description=(
+            "Optional detection method id from model.presets "
+            "(autoencoder/chow_liu). Unknown values fall back to 'autoencoder'."
         ),
     )
 
@@ -1071,10 +1086,12 @@ def process_upload_local(
     file_path,
     message,
     model_preset=None,
+    model_type=None,
 ):
     """
-    Process the uploaded CSV locally: download from GCS, train autoencoder,
-    score outliers, and write results to Firestore.
+    Process the uploaded CSV locally: download from GCS, fit either a
+    Chow-Liu tree or an autoencoder, score outliers, and write results to
+    Firestore.
 
     Args:
         job_id: Firestore job document ID
@@ -1082,17 +1099,13 @@ def process_upload_local(
         file_path: GCS file path
         message: Pub/Sub message object for ack deadline extension
         model_preset: Optional preset id from :mod:`model.presets`
-            (auto/small/medium/large). ``None`` and unknown values are
-            normalized to ``auto`` by ``build_model_config`` (TASKS.md 3.2).
+            (auto/small/medium/large). Used only when ``model_type``
+            resolves to ``autoencoder``.
+        model_type: Optional detection method id from :mod:`model.presets`
+            (``autoencoder`` or ``chow_liu``). ``None`` and unknown values
+            default to ``autoencoder``.
     """
-    # Lazy imports - TF must not be loaded at module scope
-    from model.autoencoder import AutoencoderModel
-    from evaluate.outliers import (
-        compute_per_column_contributions,
-        compute_reconstruction_error,
-    )
-    import tensorflow as tf
-
+    resolved_model_type = normalize_model_type(model_type)
     job_ref = db.collection('jobs').document(job_id)
 
     # WORK-05/06: Start ack deadline extension, but *without* a job_ref
@@ -1443,6 +1456,117 @@ def process_upload_local(
             )
             return
 
+        MAX_CONTRIBUTIONS_PER_OUTLIER = 10
+
+        if resolved_model_type == MODEL_TYPE_CHOW_LIU:
+            from chow_liu_rank import CLTree, per_column_contributions_from_nll
+
+            logger.info(
+                f"Job {job_id} detection method: chow_liu "
+                f"(n_rows={len(process_df)}, n_cols={process_df.shape[1]})"
+            )
+            try:
+                job_ref.update({'modelType': MODEL_TYPE_CHOW_LIU})
+            except Exception as method_meta_err:
+                logger.warning(
+                    f"Failed to persist modelType metadata for job "
+                    f"{job_id}: {method_meta_err}"
+                )
+
+            transaction = db.transaction()
+            update_job_status(transaction, job_ref, JobStatus.TRAINING)
+
+            if is_job_canceled(job_id):
+                logger.info(f"Job {job_id} was canceled before Chow-Liu fitting, aborting")
+                return
+
+            try:
+                cl_model = CLTree(alpha=1.0).fit(
+                    process_df, mi_subsample=10000, random_state=42
+                )
+            except Exception as train_err:
+                mark_job_error(
+                    job_ref,
+                    job_id,
+                    "Chow-Liu model fitting failed. The uploaded dataset may be "
+                    "too small or too uniform to fit a dependency tree.",
+                    error_code=ErrorCode.TRAINING_FAILURE,
+                    error_type=ErrorType.TRAINING,
+                )
+                logger.error(f"Chow-Liu fitting failed for job {job_id}: {train_err}")
+                return
+
+            if is_job_canceled(job_id):
+                logger.info(f"Job {job_id} was canceled after Chow-Liu fitting, aborting scoring")
+                return
+
+            transaction = db.transaction()
+            update_job_status(transaction, job_ref, JobStatus.SCORING)
+
+            try:
+                per_col_nll = cl_model.per_column_nll(process_df)
+                anomaly_scores = per_col_nll.mean(axis=1)
+                df['reconstruction_error'] = anomaly_scores
+
+                top_outliers = df.sort_values(
+                    by='reconstruction_error', ascending=False
+                ).head(100)
+                top_outliers = top_outliers.replace(
+                    [np.inf, -np.inf], 0
+                ).fillna("missing")
+
+                top_positions = df.index.get_indexer(top_outliers.index)
+                outliers_data = []
+                for pos, (_, row) in zip(top_positions, top_outliers.iterrows()):
+                    contributions = per_column_contributions_from_nll(
+                        per_col_nll[pos], cl_model.columns
+                    )
+                    capped_contribs = contributions[:MAX_CONTRIBUTIONS_PER_OUTLIER]
+                    row_dict = row.to_dict()
+                    score = _safe_float(anomaly_scores[pos])
+                    row_dict['reconstruction_error'] = score
+                    outliers_data.append({
+                        'data': row_dict,
+                        'reconstruction_error': score,
+                        'contributions': [
+                            {'column': col, 'percentage': float(pct)}
+                            for col, pct in capped_contribs
+                        ],
+                    })
+
+                transaction = db.transaction()
+                update_job_status(transaction, job_ref, JobStatus.COMPLETE, {
+                    'stats': stats,
+                    'outliers': outliers_data,
+                    'modelType': MODEL_TYPE_CHOW_LIU,
+                    'processedAt': firestore.SERVER_TIMESTAMP,
+                })
+                logger.info(
+                    f"Job {job_id} complete (chow_liu). Saved {len(outliers_data)} "
+                    f"outliers to Firestore."
+                )
+            except Exception as score_err:
+                mark_job_error(
+                    job_ref,
+                    job_id,
+                    "Outlier scoring failed after fitting the Chow-Liu tree. "
+                    "Please try again or contact support if the problem persists.",
+                    error_code=ErrorCode.SCORING_FAILURE,
+                    error_type=ErrorType.SCORING,
+                )
+                logger.exception(
+                    f"Chow-Liu scoring failed for job {job_id}: {score_err}"
+                )
+            return
+
+        # Lazy imports - TF must not be loaded at module scope or for Chow-Liu jobs
+        from model.autoencoder import AutoencoderModel
+        from evaluate.outliers import (
+            compute_per_column_contributions,
+            compute_reconstruction_error,
+        )
+        import tensorflow as tf
+
         # 6. Vectorization (split before fitting to prevent data leakage)
         from sklearn.model_selection import train_test_split as _tts
         model_variable_types = {col: 'categorical' for col in process_df.columns}
@@ -1488,6 +1612,7 @@ def process_upload_local(
         try:
             job_ref.update(
                 {
+                    'modelType': resolved_model_type,
                     'modelPreset': resolved_preset,
                     'modelPresetRequested': requested_preset,
                 }
@@ -1601,7 +1726,6 @@ def process_upload_local(
 
             predictions_np = reconstruction if isinstance(reconstruction, np.ndarray) else np.array(reconstruction)
             vectorized_np = vectorized_df.to_numpy()
-            MAX_CONTRIBUTIONS_PER_OUTLIER = 10
 
             outliers_data = []
             for idx, row in top_outliers.iterrows():
@@ -1631,6 +1755,7 @@ def process_upload_local(
             update_job_status(transaction, job_ref, JobStatus.COMPLETE, {
                 'stats': stats,
                 'outliers': outliers_data,
+                'modelType': resolved_model_type,
                 'processedAt': firestore.SERVER_TIMESTAMP
             })
 
@@ -1705,6 +1830,7 @@ def process_upload_vertex(
     file_path,
     message,
     model_preset=None,
+    model_type=None,
 ):
     """
     Dispatch processing to a Vertex AI CustomContainerTrainingJob.
@@ -1717,10 +1843,14 @@ def process_upload_vertex(
         model_preset: Optional preset id from :mod:`model.presets`
             (auto/small/medium/large). Forwarded to the Vertex
             training container via the ``--model-preset`` CLI flag
-            (TASKS.md 3.2).
+            (TASKS.md 3.2) when ``model_type`` is ``autoencoder``.
+        model_type: Optional detection method id from :mod:`model.presets`
+            (``autoencoder`` or ``chow_liu``). Forwarded via
+            ``--model-type`` when non-default.
     """
     from google.cloud import aiplatform
 
+    resolved_model_type = normalize_model_type(model_type)
     job_ref = db.collection('jobs').document(job_id)
 
     # WORK-05/06: Start ack deadline extension. job_ref is intentionally
@@ -1886,13 +2016,14 @@ def process_upload_vertex(
         # input_dim and n_rows. Best-effort write: a Firestore hiccup
         # here should not abort the dispatch.
         requested_preset_for_vertex = normalize_preset_name(model_preset)
+        meta_update = {'modelType': resolved_model_type}
+        if resolved_model_type != MODEL_TYPE_CHOW_LIU:
+            meta_update['modelPresetRequested'] = requested_preset_for_vertex
         try:
-            job_ref.update(
-                {'modelPresetRequested': requested_preset_for_vertex}
-            )
+            job_ref.update(meta_update)
         except Exception as preset_meta_err:
             logger.warning(
-                f"Failed to persist modelPresetRequested for Vertex "
+                f"Failed to persist model metadata for Vertex "
                 f"job {job_id}: {preset_meta_err}"
             )
 
@@ -1937,7 +2068,12 @@ def process_upload_vertex(
             bucket_name,
             file_path,
             max_unique_values=_resolve_explicit_max_unique_values(),
-            model_preset=requested_preset_for_vertex if model_preset is not None else None,
+            model_preset=(
+                requested_preset_for_vertex
+                if (model_preset is not None and resolved_model_type != MODEL_TYPE_CHOW_LIU)
+                else None
+            ),
+            model_type=resolved_model_type if model_type is not None else None,
         )
 
         job.run(
@@ -2133,6 +2269,7 @@ def callback(message):
         # untouched here so the worker logs / persists exactly what the
         # client sent.
         model_preset = validated.modelPreset
+        model_type = validated.modelType
 
         # WORK-04: Read-only idempotency check. We intentionally do NOT mark
         # the message as processed here: the marker is written AFTER
@@ -2168,11 +2305,13 @@ def callback(message):
                 process_upload_vertex(
                     job_id, bucket, file_path, message,
                     model_preset=model_preset,
+                    model_type=model_type,
                 )
             else:
                 process_upload_local(
                     job_id, bucket, file_path, message,
                     model_preset=model_preset,
+                    model_type=model_type,
                 )
         except JobDocumentNotReadyError as not_ready:
             # Codex P1 (r3053739500): the job document hasn't been written

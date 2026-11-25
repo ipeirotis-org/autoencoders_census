@@ -680,6 +680,15 @@ Ran comparisons on SADC 2015 and SADC 2017 using the composite outlier indicator
 6. **Chow-Liu is dramatically faster** — fits in <1 second vs. ~50 seconds for AE training. For quick screening, Chow-Liu is a practical choice.
 7. **Ensemble potential** — since AE excels at top-of-list and Chow-Liu at consistency, combining both scores (task 9.2's recommendation) could yield the best of both worlds.
 
+### ~~10.6 Expose Chow-Liu in the web UI (Aletheia)~~ DONE
+Wired `CLTree` (`chow_liu_rank.py`) through the full web stack so researchers can pick between **Chow-Liu Tree** and **Autoencoder (Neural)** directly in the browser:
+- **`chow_liu_rank.py`**: Added `CLTree.per_column_nll()`, `CLTree.compute_per_column_contributions()`, `CLTree.predict_most_likely()`, and `per_column_contributions_from_nll()` for exact additive per-column surprisal decomposition and conditional MAP predictions.
+- **`model/presets.py`**: Added canonical detection-method catalog (`MODEL_TYPE_INFO`, `VALID_MODEL_TYPES`, `list_model_types()`, `normalize_model_type()`).
+- **`worker.py` & `train/task.py`**: Added optional `modelType` field on `PubSubMessage` and `--model-type` Vertex CLI flag (rolling-deploy compatible: omits default `autoencoder`, suppresses `--model-preset` for `chow_liu`); Chow-Liu executes without importing TensorFlow in both local and Vertex modes and produces the same structured `{data, reconstruction_error, contributions}` records.
+- **`frontend/server/`**: Added `modelMethods.ts`, validated `modelType` in `validateStartJob`, returned `methods` alongside `presets` on `GET /api/jobs/presets`, and forwarded `modelType` from `POST /api/jobs/start-job`.
+- **`frontend/client/`**: Added an accessible Detection Method selector card (`Chow-Liu Tree` vs. `Autoencoder (Neural)`) in `Index.tsx`, conditionally displaying the Autoencoder size preset dropdown only when Autoencoder is selected, and updated `JobProgress.tsx` and `OutlierTable.tsx` to display method-aware labels and estimated runtime.
+- **Tests**: Extended `tests/test_chow_liu.py`, `tests/test_model_presets.py` (including TS drift guards), `frontend/server/__tests__/middleware/validation.test.ts`, and added `tests/test_chow_liu_worker.py` and `frontend/server/__tests__/routes/jobsModelType.test.ts`.
+
 ## 11. Public Launch Plan (Cloud Run consolidation)
 
 Authoritative phased plan for taking the app public on GCP project `autoencoders-census`. All work lands on branch `claude/prepare-public-deployment-wzg92`; each phase ships as its own PR so Codex can review independently. Mark each phase `DONE` with a short summary as it ships, in the same style as the rest of this file.

@@ -3,7 +3,12 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from chow_liu_rank import CLTree, ColumnSpec, rank_rows_by_chow_liu
+from chow_liu_rank import (
+    CLTree,
+    ColumnSpec,
+    per_column_contributions_from_nll,
+    rank_rows_by_chow_liu,
+)
 
 
 def make_correlated_survey(n_rows=500, seed=42):
@@ -250,3 +255,67 @@ class TestChowLiuOutlierDetection(unittest.TestCase):
         self.assertEqual(len(logp), 120)
         self.assertEqual(len(tree.edges()), 0)  # no edges with 1 node
         self.assertFalse(np.any(np.isnan(logp)))
+
+
+class TestCLTreePerColumnAndPredictions(unittest.TestCase):
+    """Test per-column NLL decomposition, contribution percentages, and MAP predictions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.df = make_correlated_survey(n_rows=500, seed=42)
+        cls.tree = CLTree(alpha=1.0).fit(cls.df)
+
+    def test_per_column_nll_sums_to_negative_log_likelihood(self):
+        nll = self.tree.per_column_nll(self.df)
+        logp = self.tree.log_likelihood(self.df)
+        self.assertEqual(nll.shape, (len(self.df), len(self.df.columns)))
+        self.assertTrue((nll >= 0.0).all())
+        np.testing.assert_allclose(nll.sum(axis=1), -logp, atol=1e-10)
+
+    def test_per_column_contributions_sum_to_100_and_sorted(self):
+        contribs = self.tree.compute_per_column_contributions(self.df.head(10))
+        self.assertEqual(len(contribs), 10)
+        for row_c in contribs:
+            self.assertEqual(len(row_c), len(self.df.columns))
+            pcts = [pct for _, pct in row_c]
+            self.assertAlmostEqual(sum(pcts), 100.0, places=5)
+            self.assertEqual(pcts, sorted(pcts, reverse=True))
+
+    def test_contributions_identify_anomalous_column(self):
+        # Construct a row where q1='a' normally pairs with q2='x' (90%) and
+        # q3='low' (70%), then flip q2 to an unseen/rare category.
+        anomalous = pd.DataFrame({"q1": ["a"], "q2": ["unseen_rare"], "q3": ["low"], "q4": ["yes"]})
+        row_c = self.tree.compute_per_column_contributions(anomalous)[0]
+        # The corrupted column (q2) or its direct child (q3) must be the top contributor
+        top_col, top_pct = row_c[0]
+        self.assertIn(top_col, {"q2", "q3"})
+        self.assertGreater(top_pct, 30.0)
+
+    def test_contributions_from_nll_edge_cases(self):
+        self.assertEqual(per_column_contributions_from_nll(np.array([]), []), [])
+        zeros = per_column_contributions_from_nll(np.zeros(4), ["a", "b", "c", "d"])
+        self.assertEqual(len(zeros), 4)
+        for _, pct in zeros:
+            self.assertAlmostEqual(pct, 25.0, places=5)
+
+    def test_predict_most_likely_recovers_conditional_modes(self):
+        probe = pd.DataFrame(
+            {"q1": ["a", "b"], "q2": ["x", "y"], "q3": ["low", "high"], "q4": ["yes", "no"]},
+            index=[10, 20],
+        )
+        # Fit with explicit root="q1" so q2 is conditioned on q1 and q3 on q2
+        rooted = CLTree(alpha=1.0).fit(self.df, root="q1")
+        preds = rooted.predict_most_likely(probe)
+        self.assertEqual(list(preds.columns), list(rooted.columns))
+        self.assertEqual(list(preds.index), [10, 20])
+        self.assertEqual(preds.loc[10, "q2"], "x")
+        self.assertEqual(preds.loc[20, "q2"], "y")
+        self.assertEqual(preds.loc[10, "q3"], "low")
+        self.assertEqual(preds.loc[20, "q3"], "high")
+
+    def test_empty_dataframe_per_column_nll_and_predictions(self):
+        empty = self.df.iloc[0:0]
+        nll = self.tree.per_column_nll(empty)
+        self.assertEqual(nll.shape, (0, len(self.df.columns)))
+        preds = self.tree.predict_most_likely(empty)
+        self.assertEqual(preds.shape, (0, len(self.df.columns)))
